@@ -2,7 +2,7 @@
 ## Quickstart
 
 ```
-% git clone https://github.com/drewr/zigutils
+% git clone --recurse-submodules https://github.com/drewr/zigutils
 % ./bootstrap.sh
 % zig build run
 ```
