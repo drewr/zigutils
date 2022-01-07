@@ -1,6 +1,10 @@
 const std = @import("std");
+const libcurl = @import("lib/zig-libcurl/libcurl.zig");
+const libssh2 = @import("lib/zig-libssh2/libssh2.zig");
+const zlib = @import("lib/zig-zlib/zlib.zig");
+const mbedtls = @import("lib/zig-mbedtls/mbedtls.zig");
 
-pub fn build(b: *std.build.Builder) void {
+pub fn build(b: *std.build.Builder) !void {
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -11,10 +15,30 @@ pub fn build(b: *std.build.Builder) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
     const mode = b.standardReleaseOptions();
 
-    const exe = b.addExecutable("zigutils", "src/main.zig");
+    const _zlib = zlib.create(b, target, mode);
+    const _mbedtls = mbedtls.create(b, target, mode);
+    const _libssh2 = libssh2.create(b, target, mode);
+    const _libcurl = try libcurl.create(b, target, mode);
+
+    _mbedtls.link(_libssh2.step);
+    _libssh2.link(_libcurl.step);
+    _mbedtls.link(_libcurl.step);
+    _zlib.link(_libcurl.step, .{});
+    _libcurl.step.install();
+
+    const exe = b.addExecutable("main", "src/main.zig");
+    _libcurl.link(exe, .{ .import_name = "curl" });
     exe.setTarget(target);
     exe.setBuildMode(mode);
     exe.install();
+
+    const tests = b.addTest("src/main.zig");
+    tests.setBuildMode(mode);
+    tests.setTarget(target);
+    _libcurl.link(tests, .{});
+    _zlib.link(tests, .{});
+    _mbedtls.link(tests);
+    _libssh2.link(tests);
 
     const run_cmd = exe.run();
     run_cmd.step.dependOn(b.getInstallStep());
