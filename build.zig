@@ -28,9 +28,6 @@ pub fn build(b: *std.build.Builder) !void {
 
     const exe = b.addExecutable("main", "src/main.zig");
     _libcurl.link(exe, .{ .import_name = "curl" });
-    exe.setTarget(target);
-    exe.setBuildMode(mode);
-    exe.install();
 
     const tests = b.addTest("src/main.zig");
     tests.setBuildMode(mode);
@@ -39,6 +36,14 @@ pub fn build(b: *std.build.Builder) !void {
     _zlib.link(tests, .{});
     _mbedtls.link(tests);
     _libssh2.link(tests);
+
+    _zlib.link(exe, .{});
+    _mbedtls.link(exe);
+    _libssh2.link(exe);
+
+    exe.setTarget(target);
+    exe.setBuildMode(mode);
+    exe.install();
 
     const run_cmd = exe.run();
     run_cmd.step.dependOn(b.getInstallStep());
