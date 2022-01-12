@@ -5,7 +5,7 @@ const curl = @cImport({
 });
 
 pub fn main() anyerror!void {
-    var host: []u8 = null;
+    var host: ?[*:0]u8 = null;
 
     const url = "http://example.com/path/index.html";
     const h = curl.curl_url();
@@ -14,8 +14,8 @@ pub fn main() anyerror!void {
     var uc = curl.curl_url_set(h, curl.CURLUPART_URL, url, 0);
     std.log.debug("uc: {any}", .{uc});
 
-    uc = curl.curl_url_get(h, curl.CURLUPART_HOST, host, 1);
-    std.log.debug("host ({any}): {s}", .{ uc, std.mem.sliceTo(host, 0) });
+    uc = curl.curl_url_get(h, curl.CURLUPART_HOST, &host, 1);
+    std.log.debug("host ({any}): {s}", .{ uc, host });
 }
 
 test "basic test" {
