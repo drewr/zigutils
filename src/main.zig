@@ -30,8 +30,7 @@ fn splitPath(path: []const u8) [2][]const u8 {
     return .{ if (user[0] == '~') user[1..] else user, repo };
 }
 
-// ERROR: ./src/main.zig:16:25: error: expected type '*.cimport:3:14.struct_Curl_URL', found '?*.cimport:3:14.struct_Curl_URL'
-fn parseUrl(alloc: Allocator, h: *curl.struct_Curl_URL, url: []const u8) void {
+fn parseUrl(alloc: Allocator, h: ?*curl.struct_Curl_URL, url: [:0]const u8) void {
     var host: ?[*:0]u8 = null;
     var path: ?[*:0]u8 = null;
 
