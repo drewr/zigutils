@@ -38,7 +38,9 @@ fn parseUrl(alloc: Allocator, h: ?*curl.struct_Curl_URL, url: [:0]const u8) void
     if (uc == 0) {
         _ = curl.curl_url_get(h, curl.CURLUPART_HOST, &host, 1);
         _ = curl.curl_url_get(h, curl.CURLUPART_PATH, &path, 1);
-        const arr = splitPath(std.mem.span(path.?));
+        const arr = splitPath(
+        // the span() converts the slice to a []const u8
+        std.mem.span(path.?));
         std.log.info("{s} / {s}", .{ arr[0], arr[1] });
     }
     alloc.free(url);
