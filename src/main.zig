@@ -11,13 +11,17 @@ const Repo = struct {
 };
 
 pub fn main() anyerror!void {
-    //    var alloc_buf: [10_000_000]u8 = undefined;
-    //    var fba = std.heap.FixedBufferAllocator.init(&alloc_buf);
-    //    const alloc = fba.allocator();
+    // var alloc_buf: [10_000_000]u8 = undefined;
+    // var fba = std.heap.FixedBufferAllocator.init(&alloc_buf);
+    // const alloc = fba.allocator();
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+    // var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    // defer arena.deinit();
+    // const alloc = arena.allocator();
+
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
 
     const stdout = std.io.getStdOut().writer();
 
@@ -81,21 +85,29 @@ fn gitClone(stdout: std.io.Writer(
     std.os.WriteError,
     std.fs.File.write,
 ), alloc: Allocator, repo: *Repo) !void {
-    const args = &[_][]const u8{
+    _ = repo;
+    const args = &.{
         "git",
         "clone",
         repo.url,
     };
-    _ = std.ChildProcess.exec(.{
+    const result = std.ChildProcess.exec(.{
         .allocator = alloc,
         .argv = args,
         .cwd = "/tmp",
         .env_map = null,
-        .max_output_bytes = 10_000,
+        .max_output_bytes = 10_000_000,
     }) catch |err| {
         std.log.warn("The following command failed:\n", .{});
         return err;
     };
 
-    try stdout.print("{any}\n", .{args});
+    // Happened upon this at
+    // https://github.com/ziglang/zig/issues/8969#issue-909829436
+    defer {
+        alloc.free(result.stdout);
+        alloc.free(result.stderr);
+    }
+
+    try stdout.print("{s}\n", .{result.stdout});
 }
