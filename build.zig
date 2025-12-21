@@ -45,6 +45,12 @@ pub fn build(b: *std.build.Builder) !void {
     exe.setBuildMode(mode);
     exe.install();
 
+    // Add nix-zsh-env executable
+    const nix_zsh_env = b.addExecutable("nix-zsh-env", "src/nix-zsh-env.zig");
+    nix_zsh_env.setTarget(target);
+    nix_zsh_env.setBuildMode(mode);
+    nix_zsh_env.install();
+
     const run_cmd = exe.run();
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| {
