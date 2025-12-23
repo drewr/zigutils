@@ -21,7 +21,8 @@
             nativeBuildInputs = [ pkgs.zig ];
 
             buildPhase = ''
-              zig build-exe src/nix-zsh-env.zig -O ReleaseSafe
+              export HOME=$TMPDIR
+              zig build-exe src/nix-zsh-env.zig -O ReleaseSafe --cache-dir $(pwd)/zig-cache
             '';
 
             installPhase = ''
