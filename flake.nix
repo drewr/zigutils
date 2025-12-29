@@ -13,6 +13,30 @@
       in
       {
         packages = {
+          gitclone = pkgs.stdenv.mkDerivation {
+            pname = "gitclone";
+            version = "0.1.0";
+            src = ./.;
+
+            nativeBuildInputs = [ pkgs.zig ];
+
+            buildPhase = ''
+              export HOME=$TMPDIR
+              zig build -Doptimize=ReleaseSafe
+            '';
+
+            installPhase = ''
+              mkdir -p $out/bin
+              cp zig-out/bin/gitclone $out/bin/
+            '';
+
+            meta = {
+              description = "Clone git repositories";
+              license = pkgs.lib.licenses.mit;
+              platforms = pkgs.lib.platforms.all;
+            };
+          };
+
           nix-zsh-env = pkgs.stdenv.mkDerivation {
             pname = "nix-zsh-env";
             version = "0.1.0";
@@ -22,12 +46,12 @@
 
             buildPhase = ''
               export HOME=$TMPDIR
-              zig build-exe src/nix-zsh-env.zig -O ReleaseSafe --cache-dir $(pwd)/zig-cache
+              zig build -Doptimize=ReleaseSafe
             '';
 
             installPhase = ''
               mkdir -p $out/bin
-              cp nix-zsh-env $out/bin/
+              cp zig-out/bin/nix-zsh-env $out/bin/
             '';
 
             meta = {
