@@ -3,12 +3,12 @@ const fs = std.fs;
 const process = std.process;
 const mem = std.mem;
 
-const GitUrl = struct {
+pub const GitUrl = struct {
     org: []const u8,
     repo: []const u8,
 };
 
-const ProgressBar = struct {
+pub const ProgressBar = struct {
     total: usize = 100,
     current: usize = 0,
     phase: []const u8 = "",
@@ -45,7 +45,7 @@ const ProgressBar = struct {
     }
 };
 
-fn parseGitProgress(line: []const u8, progress: *ProgressBar) void {
+pub fn parseGitProgress(line: []const u8, progress: *ProgressBar) void {
     // Git output patterns:
     // "Counting objects: 100% (123/123)"
     // "Compressing objects: 50% (50/100)"
@@ -79,12 +79,12 @@ fn parseGitProgress(line: []const u8, progress: *ProgressBar) void {
     }
 }
 
-const GitProgressInfo = struct {
+pub const GitProgressInfo = struct {
     current: usize,
     total: usize,
 };
 
-fn parseGitPercentage(line: []const u8) ?GitProgressInfo {
+pub fn parseGitPercentage(line: []const u8) ?GitProgressInfo {
     // Look for pattern like "(123/456)" or "(123/456, 789 bytes)"
     const open_paren = mem.indexOf(u8, line, "(") orelse return null;
     const close_paren = mem.indexOf(u8, line[open_paren..], ")") orelse return null;
@@ -139,7 +139,7 @@ fn reportParseError(err: UrlParseError) void {
     std.debug.print("\n", .{});
 }
 
-fn parseGitUrl(allocator: mem.Allocator, url: []const u8) !GitUrl {
+pub fn parseGitUrl(allocator: mem.Allocator, url: []const u8) !GitUrl {
     // Check if it looks like a local path
     if (mem.indexOf(u8, url, "@") == null and
         mem.indexOf(u8, url, "://") == null)
@@ -155,6 +155,17 @@ fn parseGitUrl(allocator: mem.Allocator, url: []const u8) !GitUrl {
 
     // Handle SSH URLs: git@github.com:org/repo.git
     if (mem.indexOf(u8, url, "@")) |at_pos| {
+        // Validate user part is not empty (@ cannot be at the beginning)
+        if (at_pos == 0) {
+            reportParseError(.{
+                .reason = "SSH format missing user",
+                .url = url,
+                .detected_format = "SSH",
+                .expected = "git@host:org/repo",
+            });
+            return error.InvalidUrl;
+        }
+
         const colon_pos = mem.lastIndexOf(u8, url, ":");
 
         if (colon_pos == null) {
@@ -169,7 +180,19 @@ fn parseGitUrl(allocator: mem.Allocator, url: []const u8) !GitUrl {
             return error.InvalidUrl;
         }
 
+        const host = url[at_pos + 1 .. colon_pos.?];
         const path = url[colon_pos.? + 1 ..];
+
+        // Validate host is not empty
+        if (host.len == 0) {
+            reportParseError(.{
+                .reason = "SSH format missing hostname",
+                .url = url,
+                .detected_format = "SSH",
+                .expected = "git@host:org/repo",
+            });
+            return error.InvalidUrl;
+        }
 
         if (mem.indexOf(u8, path, "/") == null) {
             reportParseError(.{
@@ -224,7 +247,19 @@ fn parseGitUrl(allocator: mem.Allocator, url: []const u8) !GitUrl {
             return error.InvalidUrl;
         }
 
+        const host = after_protocol[0..slash_pos.?];
         const path = after_protocol[slash_pos.? + 1 ..];
+
+        // Validate host is not empty
+        if (host.len == 0) {
+            reportParseError(.{
+                .reason = "Missing hostname",
+                .url = url,
+                .detected_format = protocol,
+                .expected = "host/org/repo",
+            });
+            return error.InvalidUrl;
+        }
 
         if (mem.indexOf(u8, path, "/") == null) {
             reportParseError(.{
@@ -257,16 +292,25 @@ fn parseGitUrl(allocator: mem.Allocator, url: []const u8) !GitUrl {
     return error.InvalidUrl;
 }
 
-fn parsePathComponent(allocator: mem.Allocator, path: []const u8) !GitUrl {
+pub fn parsePathComponent(allocator: mem.Allocator, path: []const u8) !GitUrl {
     // Path should be like "org/repo.git" or "org/repo"
     const slash_pos = mem.indexOf(u8, path, "/") orelse return error.InvalidUrl;
     const org = path[0..slash_pos];
     var repo = path[slash_pos + 1 ..];
 
+    // Validate org is not empty
+    if (org.len == 0) return error.InvalidUrl;
+
+    // Validate repo doesn't contain additional slashes
+    if (mem.indexOf(u8, repo, "/") != null) return error.InvalidUrl;
+
     // Remove .git suffix if present
     if (mem.endsWith(u8, repo, ".git")) {
         repo = repo[0 .. repo.len - 4];
     }
+
+    // Validate repo is not empty after removing .git
+    if (repo.len == 0) return error.InvalidUrl;
 
     return GitUrl{
         .org = try allocator.dupe(u8, org),
