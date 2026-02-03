@@ -61,15 +61,25 @@
             };
           };
 
-          default = self.packages.${system}.nix-zsh-env;
+          default = pkgs.symlinkJoin {
+            name = "zigutils";
+            paths = [
+              self.packages.${system}.gitclone
+              self.packages.${system}.nix-zsh-env
+            ];
+          };
         };
 
         apps = {
+          gitclone = {
+            type = "app";
+            program = "${self.packages.${system}.gitclone}/bin/gitclone";
+          };
           nix-zsh-env = {
             type = "app";
             program = "${self.packages.${system}.nix-zsh-env}/bin/nix-zsh-env";
           };
-          default = self.apps.${system}.nix-zsh-env;
+          default = self.apps.${system}.gitclone;
         };
       }
     );
