@@ -325,6 +325,14 @@ fn getHome(allocator: mem.Allocator) ![]const u8 {
     };
 }
 
+pub fn destinationExists(path: []const u8) !bool {
+    fs.cwd().access(path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    return true;
+}
+
 fn runGitCloneWithProgress(allocator: mem.Allocator, url: []const u8, dest: []const u8) !void {
     var child = process.Child.init(&[_][]const u8{ "git", "clone", "--progress", url, dest }, allocator);
     child.stdin_behavior = .Ignore;
@@ -429,6 +437,17 @@ pub fn main() !void {
 
     const full_path = try fs.path.join(allocator, &[_][]const u8{ org_path, parsed.repo });
     defer allocator.free(full_path);
+
+    const dest_exists = destinationExists(full_path) catch |err| {
+        std.debug.print("Error checking destination {s}: {}\n", .{ full_path, err });
+        return err;
+    };
+
+    if (dest_exists) {
+        std.debug.print("Destination already exists: {s}\n", .{full_path});
+        std.debug.print("Remove it or choose a different --root.\n", .{});
+        return error.DestinationExists;
+    }
 
     // Create directories if they don't exist
     fs.cwd().makePath(org_path) catch |err| {

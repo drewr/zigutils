@@ -8,6 +8,7 @@ const parseGitUrl = gitclone.parseGitUrl;
 const parsePathComponent = gitclone.parsePathComponent;
 const parseGitProgress = gitclone.parseGitProgress;
 const parseGitPercentage = gitclone.parseGitPercentage;
+const destinationExists = gitclone.destinationExists;
 const GitUrl = gitclone.GitUrl;
 const ProgressBar = gitclone.ProgressBar;
 const GitProgressInfo = gitclone.GitProgressInfo;
@@ -572,6 +573,33 @@ test "progress parsing with realistic git output" {
     try testing.expectEqualStrings("Resolving ", progress.phase);
     try testing.expectEqual(@as(usize, 1000), progress.current);
     try testing.expectEqual(@as(usize, 1000), progress.total);
+}
+
+test "destinationExists detects existing path" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(base);
+
+    const existing = try std.fs.path.join(testing.allocator, &[_][]const u8{ base, "already-there" });
+    defer testing.allocator.free(existing);
+
+    try tmp.dir.makePath("already-there");
+    try testing.expectEqual(true, try destinationExists(existing));
+}
+
+test "destinationExists detects missing path" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const base = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(base);
+
+    const missing = try std.fs.path.join(testing.allocator, &[_][]const u8{ base, "does-not-exist" });
+    defer testing.allocator.free(missing);
+
+    try testing.expectEqual(false, try destinationExists(missing));
 }
 
 // ============================================================================
