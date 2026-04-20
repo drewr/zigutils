@@ -1,19 +1,9 @@
 const std = @import("std");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
-
+pub fn main(init: std.process.Init) !void {
     // Get the buildInputs environment variable (contains explicitly requested packages)
-    const build_inputs = std.process.getEnvVarOwned(alloc, "buildInputs") catch |err| {
-        // If buildInputs is not set, we're not in a nix-shell, just exit silently
-        if (err == error.EnvironmentVariableNotFound) {
-            return;
-        }
-        return err;
-    };
-    defer alloc.free(build_inputs);
+    // If buildInputs is not set, we're not in a nix-shell, just exit silently
+    const build_inputs = init.environ_map.get("buildInputs") orelse return;
 
     // Split buildInputs by space
     var input_iter = std.mem.splitScalar(u8, build_inputs, ' ');
@@ -80,6 +70,6 @@ pub fn main() !void {
         output_buf[output_len] = '\n';
         output_len += 1;
 
-        _ = try std.posix.write(std.posix.STDOUT_FILENO, output_buf[0..output_len]);
+        try std.Io.File.stdout().writeStreamingAll(init.io, output_buf[0..output_len]);
     }
 }

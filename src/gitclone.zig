@@ -318,28 +318,30 @@ pub fn parsePathComponent(allocator: mem.Allocator, path: []const u8) !GitUrl {
     };
 }
 
-fn getHome(allocator: mem.Allocator) ![]const u8 {
-    return process.getEnvVarOwned(allocator, "HOME") catch |err| {
+fn getHome(allocator: mem.Allocator, environ_map: *std.process.Environ.Map) ![]const u8 {
+    const home = environ_map.get("HOME") orelse {
         std.debug.print("Error: Could not get HOME environment variable\n", .{});
-        return err;
+        return error.EnvironmentVariableNotFound;
     };
+    return allocator.dupe(u8, home);
 }
 
-pub fn destinationExists(path: []const u8) !bool {
-    fs.cwd().access(path, .{}) catch |err| switch (err) {
+pub fn destinationExists(io: std.Io, path: []const u8) !bool {
+    std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
     return true;
 }
 
-fn runGitCloneWithProgress(allocator: mem.Allocator, url: []const u8, dest: []const u8) !void {
-    var child = process.Child.init(&[_][]const u8{ "git", "clone", "--progress", url, dest }, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe; // Git outputs progress to stderr
-
-    try child.spawn();
+fn runGitCloneWithProgress(io: std.Io, url: []const u8, dest: []const u8) !void {
+    var child = try process.spawn(io, .{
+        .argv = &.{ "git", "clone", "--progress", url, dest },
+        .stdin = .ignore,
+        .stdout = .pipe,
+        .stderr = .pipe,
+    });
+    defer child.kill(io);
 
     var progress = ProgressBar{};
     var buffer: [4096]u8 = undefined;
@@ -347,8 +349,8 @@ fn runGitCloneWithProgress(allocator: mem.Allocator, url: []const u8, dest: []co
     // Read stderr (where git outputs progress)
     if (child.stderr) |stderr| {
         while (true) {
-            const bytes_read = stderr.read(&buffer) catch break;
-            if (bytes_read == 0) break;
+            const vecs: [1][]u8 = .{buffer[0..]};
+            const bytes_read = stderr.readStreaming(io, &vecs) catch break;
 
             const output = buffer[0..bytes_read];
 
@@ -365,17 +367,16 @@ fn runGitCloneWithProgress(allocator: mem.Allocator, url: []const u8, dest: []co
     // Read stdout (for any regular output)
     if (child.stdout) |stdout| {
         while (true) {
-            const bytes_read = stdout.read(&buffer) catch break;
-            if (bytes_read == 0) break;
-            // Just consume it, don't display
+            const vecs: [1][]u8 = .{buffer[0..]};
+            _ = stdout.readStreaming(io, &vecs) catch break;
         }
     }
 
-    const term = try child.wait();
+    const term = try child.wait(io);
     progress.finish();
 
     switch (term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
                 std.debug.print("git clone exited with code {}\n", .{code});
                 return error.GitCloneFailed;
@@ -385,13 +386,9 @@ fn runGitCloneWithProgress(allocator: mem.Allocator, url: []const u8, dest: []co
     }
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const args = try process.argsAlloc(allocator);
-    defer process.argsFree(allocator, args);
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var root_dir: ?[]const u8 = null;
     var git_url: ?[]const u8 = null;
@@ -425,7 +422,7 @@ pub fn main() !void {
 
     // Determine the root directory
     const base_path = if (root_dir) |r| try allocator.dupe(u8, r) else blk: {
-        const home = try getHome(allocator);
+        const home = try getHome(allocator, init.environ_map);
         defer allocator.free(home);
         break :blk try fs.path.join(allocator, &[_][]const u8{ home, "src" });
     };
@@ -438,7 +435,7 @@ pub fn main() !void {
     const full_path = try fs.path.join(allocator, &[_][]const u8{ org_path, parsed.repo });
     defer allocator.free(full_path);
 
-    const dest_exists = destinationExists(full_path) catch |err| {
+    const dest_exists = destinationExists(init.io, full_path) catch |err| {
         std.debug.print("Error checking destination {s}: {}\n", .{ full_path, err });
         return err;
     };
@@ -450,14 +447,14 @@ pub fn main() !void {
     }
 
     // Create directories if they don't exist
-    fs.cwd().makePath(org_path) catch |err| {
+    std.Io.Dir.cwd().createDirPath(init.io, org_path) catch |err| {
         std.debug.print("Error creating directory {s}: {}\n", .{ org_path, err });
         return err;
     };
 
     std.debug.print("Cloning {s} into {s}\n", .{ url, full_path });
 
-    try runGitCloneWithProgress(allocator, url, full_path);
+    try runGitCloneWithProgress(init.io, url, full_path);
 
     std.debug.print("Successfully cloned to {s}\n", .{full_path});
 }
