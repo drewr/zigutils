@@ -579,27 +579,27 @@ test "destinationExists detects existing path" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const base = try tmp.dir.realpathAlloc(testing.allocator, ".");
-    defer testing.allocator.free(base);
+    const tmp_abs = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_abs);
 
-    const existing = try std.fs.path.join(testing.allocator, &[_][]const u8{ base, "already-there" });
+    const existing = try std.fs.path.join(testing.allocator, &[_][]const u8{ tmp_abs, "already-there" });
     defer testing.allocator.free(existing);
 
-    try tmp.dir.makePath("already-there");
-    try testing.expectEqual(true, try destinationExists(existing));
+    try std.Io.Dir.createDirPath(tmp.dir, testing.io, "already-there");
+    try testing.expectEqual(true, try destinationExists(testing.io, existing));
 }
 
 test "destinationExists detects missing path" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const base = try tmp.dir.realpathAlloc(testing.allocator, ".");
-    defer testing.allocator.free(base);
+    const tmp_abs = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(tmp_abs);
 
-    const missing = try std.fs.path.join(testing.allocator, &[_][]const u8{ base, "does-not-exist" });
+    const missing = try std.fs.path.join(testing.allocator, &[_][]const u8{ tmp_abs, "does-not-exist" });
     defer testing.allocator.free(missing);
 
-    try testing.expectEqual(false, try destinationExists(missing));
+    try testing.expectEqual(false, try destinationExists(testing.io, missing));
 }
 
 // ============================================================================

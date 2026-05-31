@@ -70,6 +70,11 @@
           };
         };
 
+        devShells.default = pkgs.mkShell {
+          name = "zigutils";
+          packages = [ pkgs.zig ];
+        };
+
         apps = {
           gitclone = {
             type = "app";
