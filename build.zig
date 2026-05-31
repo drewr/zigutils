@@ -23,4 +23,15 @@ pub fn build(b: *std.Build) !void {
         }),
     });
     b.installArtifact(nix_zsh_env);
+
+    const test_step = b.step("test", "Run tests");
+    const gitclone_test_exe = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gitclone_test.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    const run_test = b.addRunArtifact(gitclone_test_exe);
+    test_step.dependOn(&run_test.step);
 }
