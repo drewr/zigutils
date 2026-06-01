@@ -134,6 +134,7 @@ fn reportParseError(err: UrlParseError) void {
     std.debug.print("\n", .{});
     std.debug.print("Valid URL formats:\n", .{});
     std.debug.print("  SSH:   git@github.com:org/repo.git\n", .{});
+    std.debug.print("  SSH:   ssh://git@github.com/org/repo.git\n", .{});
     std.debug.print("  HTTPS: https://github.com/org/repo.git\n", .{});
     std.debug.print("  HTTP:  http://github.com/org/repo.git\n", .{});
     std.debug.print("\n", .{});
@@ -153,43 +154,33 @@ pub fn parseGitUrl(allocator: mem.Allocator, url: []const u8) !GitUrl {
         return error.InvalidUrl;
     }
 
-    // Handle SSH URLs: git@github.com:org/repo.git
-    if (mem.indexOf(u8, url, "@")) |at_pos| {
-        // Validate user part is not empty (@ cannot be at the beginning)
-        if (at_pos == 0) {
+    // Handle SSH protocol URLs: ssh://git@github.com/org/repo.git
+    // Must come before SCP-style SSH check since ssh:// URLs also contain '@'
+    if (mem.startsWith(u8, url, "ssh://")) {
+        const after_protocol = url["ssh://".len..];
+        const slash_pos = mem.indexOf(u8, after_protocol, "/");
+
+        if (slash_pos == null) {
             reportParseError(.{
-                .reason = "SSH format missing user",
+                .reason = "Missing path after hostname",
                 .url = url,
-                .detected_format = "SSH",
-                .expected = "git@host:org/repo",
+                .detected_format = "SSH (ssh://)",
+                .found_at = after_protocol,
+                .expected = "ssh://host/org/repo",
             });
             return error.InvalidUrl;
         }
 
-        const colon_pos = mem.lastIndexOf(u8, url, ":");
-
-        if (colon_pos == null) {
-            const host_part = url[at_pos + 1 ..];
-            reportParseError(.{
-                .reason = "SSH format missing colon separator",
-                .url = url,
-                .detected_format = "SSH (git@...)",
-                .found_at = host_part,
-                .expected = "git@host:org/repo",
-            });
-            return error.InvalidUrl;
-        }
-
-        const host = url[at_pos + 1 .. colon_pos.?];
-        const path = url[colon_pos.? + 1 ..];
+        const host = after_protocol[0..slash_pos.?];
+        const path = after_protocol[slash_pos.? + 1 ..];
 
         // Validate host is not empty
         if (host.len == 0) {
             reportParseError(.{
-                .reason = "SSH format missing hostname",
+                .reason = "Missing hostname",
                 .url = url,
-                .detected_format = "SSH",
-                .expected = "git@host:org/repo",
+                .detected_format = "SSH (ssh://)",
+                .expected = "ssh://host/org/repo",
             });
             return error.InvalidUrl;
         }
@@ -198,7 +189,7 @@ pub fn parseGitUrl(allocator: mem.Allocator, url: []const u8) !GitUrl {
             reportParseError(.{
                 .reason = "Path missing org/repo separator",
                 .url = url,
-                .detected_format = "SSH (git@host:...)",
+                .detected_format = "SSH (ssh://)",
                 .found_at = path,
                 .expected = "org/repo or org/repo.git",
             });
@@ -209,7 +200,7 @@ pub fn parseGitUrl(allocator: mem.Allocator, url: []const u8) !GitUrl {
             reportParseError(.{
                 .reason = "Failed to parse org/repo from path",
                 .url = url,
-                .detected_format = "SSH",
+                .detected_format = "SSH (ssh://)",
                 .found_at = path,
                 .expected = "org/repo or org/repo.git",
             });
@@ -284,10 +275,70 @@ pub fn parseGitUrl(allocator: mem.Allocator, url: []const u8) !GitUrl {
         };
     }
 
+    // Handle SCP-style SSH URLs: git@github.com:org/repo.git
+    if (mem.indexOf(u8, url, "@")) |at_pos| {
+        // Validate user part is not empty (@ cannot be at the beginning)
+        if (at_pos == 0) {
+            reportParseError(.{
+                .reason = "SSH format missing user",
+                .url = url,
+                .detected_format = "SSH",
+                .expected = "git@host:org/repo",
+            });
+            return error.InvalidUrl;
+        }
+
+        const colon_pos = mem.lastIndexOf(u8, url, ":") orelse {
+            reportParseError(.{
+                .reason = "SSH format missing colon separator",
+                .url = url,
+                .detected_format = "SSH (git@...)",
+                .expected = "git@host:org/repo",
+            });
+            return error.InvalidUrl;
+        };
+
+        const host = url[at_pos + 1 .. colon_pos];
+        const path = url[colon_pos + 1 ..];
+
+        // Validate host is not empty
+        if (host.len == 0) {
+            reportParseError(.{
+                .reason = "SSH format missing hostname",
+                .url = url,
+                .detected_format = "SSH",
+                .expected = "git@host:org/repo",
+            });
+            return error.InvalidUrl;
+        }
+
+        if (mem.indexOf(u8, path, "/") == null) {
+            reportParseError(.{
+                .reason = "Path missing org/repo separator",
+                .url = url,
+                .detected_format = "SSH (git@host:...)",
+                .found_at = path,
+                .expected = "org/repo or org/repo.git",
+            });
+            return error.InvalidUrl;
+        }
+
+        return parsePathComponent(allocator, path) catch |err| {
+            reportParseError(.{
+                .reason = "Failed to parse org/repo from path",
+                .url = url,
+                .detected_format = "SSH",
+                .found_at = path,
+                .expected = "org/repo or org/repo.git",
+            });
+            return err;
+        };
+    }
+
     reportParseError(.{
         .reason = "URL doesn't start with recognized protocol",
         .url = url,
-        .expected = "git@... OR http://... OR https://...",
+        .expected = "git@... OR http://... OR https://... OR ssh://...",
     });
     return error.InvalidUrl;
 }
