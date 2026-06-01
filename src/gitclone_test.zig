@@ -101,6 +101,42 @@ test "parse HTTPS URL with different domain" {
     try testing.expectEqualStrings("project", result.repo);
 }
 
+test "parse SSH protocol URL (ssh://) with Codeberg" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const url = "ssh://git@codeberg.org/ziglang/zig.git";
+    const result = try parseGitUrl(allocator, url);
+
+    try testing.expectEqualStrings("ziglang", result.org);
+    try testing.expectEqualStrings("zig", result.repo);
+}
+
+test "parse HTTPS URL with Codeberg" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const url = "https://codeberg.org/ziglang/zig.git";
+    const result = try parseGitUrl(allocator, url);
+
+    try testing.expectEqualStrings("ziglang", result.org);
+    try testing.expectEqualStrings("zig", result.repo);
+}
+
+test "parse SSH protocol URL (ssh://) without .git suffix" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const url = "ssh://git@github.com/microsoft/vscode";
+    const result = try parseGitUrl(allocator, url);
+
+    try testing.expectEqualStrings("microsoft", result.org);
+    try testing.expectEqualStrings("vscode", result.repo);
+}
+
 // ============================================================================
 // URL PARSING TESTS - Invalid Cases (Generative)
 // ============================================================================
@@ -205,6 +241,7 @@ test "reject malformed protocol URLs" {
         "git://github.com/org/repo",
         "github.com://org/repo",
         "http/github.com/org/repo",
+        "ssh://git@github.com:org/repo.git",  // ssh:// with SCP-style colon path
     };
 
     for (invalid_urls) |url| {
@@ -658,6 +695,25 @@ test "reject HTTP URLs with protocol variations" {
     };
 
     for (bad_http_urls) |url| {
+        const result = parseGitUrl(allocator, url);
+        try testing.expectError(error.InvalidUrl, result);
+    }
+}
+
+test "reject SSH protocol URLs (ssh://) with missing components" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const bad_ssh_proto_urls = [_][]const u8{
+        "ssh://",                        // Only protocol
+        "ssh://github.com",              // Missing path
+        "ssh://github.com/",             // Missing org/repo
+        "ssh:///org/repo.git",           // Missing host
+        "ssh://github.com/onlyrepo",     // Missing org/repo separator
+    };
+
+    for (bad_ssh_proto_urls) |url| {
         const result = parseGitUrl(allocator, url);
         try testing.expectError(error.InvalidUrl, result);
     }
