@@ -70,6 +70,24 @@ test "parse SSH from custom host" {
     try testing.expectEqualStrings("project", result.repo);
 }
 
+test "parse SSH protocol URL (ssh://) with Codeberg" {
+    const result = try parseGitUrl("ssh://git@codeberg.org/ziglang/zig.git");
+    try testing.expectEqualStrings("ziglang", result.org);
+    try testing.expectEqualStrings("zig", result.repo);
+}
+
+test "parse HTTPS URL with Codeberg" {
+    const result = try parseGitUrl("https://codeberg.org/ziglang/zig.git");
+    try testing.expectEqualStrings("ziglang", result.org);
+    try testing.expectEqualStrings("zig", result.repo);
+}
+
+test "parse SSH protocol URL (ssh://) without .git suffix" {
+    const result = try parseGitUrl("ssh://git@github.com/microsoft/vscode");
+    try testing.expectEqualStrings("microsoft", result.org);
+    try testing.expectEqualStrings("vscode", result.repo);
+}
+
 // ============================================================================
 // URL PARSING TESTS - Invalid Cases
 // ============================================================================
@@ -437,6 +455,16 @@ test "reject HTTP URLs with protocol variations" {
     try testing.expectError(error.MissingPath, parseGitUrl("http://"));
     try testing.expectError(error.MissingPath, parseGitUrl("http://github.com"));
     try testing.expectError(error.MissingPath, parseGitUrl("http://github.com/"));
+}
+
+test "reject SSH protocol URLs (ssh://) with missing components" {
+    try testing.expectError(error.MissingPath, parseGitUrl("ssh://"));
+    try testing.expectError(error.MissingPath, parseGitUrl("ssh://github.com"));
+    try testing.expectError(error.MissingPath, parseGitUrl("ssh://github.com/"));
+    try testing.expectError(error.MissingHostname, parseGitUrl("ssh:///org/repo.git"));
+    try testing.expectError(error.MissingPath, parseGitUrl("ssh://github.com/onlyrepo"));
+    // SCP-style colon path inside an ssh:// URL
+    try testing.expectError(error.MissingPath, parseGitUrl("ssh://git@github.com:org/repo.git"));
 }
 
 test "accept URLs with special characters in org/repo names" {

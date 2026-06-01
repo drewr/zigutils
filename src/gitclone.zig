@@ -10,6 +10,10 @@ pub const GitUrl = struct {
 /// Returns a ParseError with a human-readable reason on failure
 /// (analogous to Haskell's Either String GitUrl).
 pub fn parseGitUrl(url: []const u8) ParseError!GitUrl {
+    // ssh:// must be checked before SCP-style, since both may contain '@'.
+    if (mem.startsWith(u8, url, "ssh://")) {
+        return parseSshProto(url);
+    }
     if (mem.indexOfScalar(u8, url, '@')) |_| {
         return parseSsh(url);
     }
@@ -37,6 +41,14 @@ fn parseSsh(url: []const u8) ParseError!GitUrl {
     const host = url[at_pos + 1 .. colon_pos];
     if (host.len == 0) return error.MissingHostname;
     return parsePath(url[colon_pos + 1 ..]);
+}
+
+fn parseSshProto(url: []const u8) ParseError!GitUrl {
+    const after_scheme = url["ssh://".len..];
+    const slash_pos = mem.indexOfScalar(u8, after_scheme, '/') orelse return error.MissingPath;
+    const host = after_scheme[0..slash_pos];
+    if (host.len == 0) return error.MissingHostname;
+    return parsePath(after_scheme[slash_pos + 1 ..]);
 }
 
 fn parseHttp(url: []const u8) ParseError!GitUrl {
@@ -154,7 +166,7 @@ pub fn parsePercentage(line: []const u8) ?ProgressInfo {
 /// Pure: format a ParseError as a human-readable string.
 pub fn formatParseError(err: ParseError) []const u8 {
     return switch (err) {
-        error.NotAGitUrl => "URL doesn't start with git@..., http://, or https://",
+        error.NotAGitUrl => "URL doesn't start with git@..., ssh://, http://, or https://",
         error.MissingUser => "SSH format missing user (expected git@host:org/repo)",
         error.MissingHostname => "Missing hostname",
         error.MissingColon => "SSH format missing colon separator",
@@ -177,6 +189,7 @@ pub fn reportParseError(err: ParseError) void {
         \\
         \\Valid URL formats:
         \\  SSH:   git@github.com:org/repo.git
+        \\  SSH:   ssh://git@github.com/org/repo.git
         \\  HTTPS: https://github.com/org/repo.git
         \\  HTTP:  http://github.com/org/repo.git
         \\
