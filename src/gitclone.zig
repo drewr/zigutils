@@ -1,6 +1,4 @@
 const std = @import("std");
-const fs = std.fs;
-const process = std.process;
 const mem = std.mem;
 
 pub const GitUrl = struct {
@@ -8,334 +6,214 @@ pub const GitUrl = struct {
     repo: []const u8,
 };
 
-pub const ProgressBar = struct {
-    total: usize = 100,
-    current: usize = 0,
-    phase: []const u8 = "",
-    width: usize = 40,
-
-    fn draw(self: *const ProgressBar) void {
-        const percent = if (self.total > 0)
-            @min(100, (self.current * 100) / self.total)
-        else
-            0;
-
-        const filled = (self.width * percent) / 100;
-
-        // Move to beginning of line and clear it
-        std.debug.print("\r\x1b[K", .{});
-
-        // Print progress bar
-        std.debug.print("{s} [", .{self.phase});
-
-        var i: usize = 0;
-        while (i < filled) : (i += 1) {
-            std.debug.print("█", .{});
-        }
-        while (i < self.width) : (i += 1) {
-            std.debug.print("░", .{});
-        }
-
-        std.debug.print("] {d}% ({d}/{d})", .{ percent, self.current, self.total });
+/// Pure: parse a git URL into its org and repo components.
+/// Returns a ParseError with a human-readable reason on failure
+/// (analogous to Haskell's Either String GitUrl).
+pub fn parseGitUrl(url: []const u8) ParseError!GitUrl {
+    if (mem.indexOfScalar(u8, url, '@')) |_| {
+        return parseSsh(url);
     }
+    if (mem.startsWith(u8, url, "https://") or mem.startsWith(u8, url, "http://")) {
+        return parseHttp(url);
+    }
+    return error.NotAGitUrl;
+}
 
-    fn finish(self: *const ProgressBar) void {
-        self.draw();
-        std.debug.print("\n", .{});
+pub const ParseError = error{
+    NotAGitUrl,
+    MissingUser,
+    MissingHostname,
+    MissingColon,
+    MissingPath,
+    EmptyOrg,
+    EmptyRepo,
+    ExtraSlashes,
+};
+
+fn parseSsh(url: []const u8) ParseError!GitUrl {
+    const at_pos = mem.indexOfScalar(u8, url, '@').?;
+    if (at_pos == 0) return error.MissingUser;
+    const colon_pos = mem.lastIndexOfScalar(u8, url, ':') orelse return error.MissingColon;
+    const host = url[at_pos + 1 .. colon_pos];
+    if (host.len == 0) return error.MissingHostname;
+    return parsePath(url[colon_pos + 1 ..]);
+}
+
+fn parseHttp(url: []const u8) ParseError!GitUrl {
+    const scheme_end: usize = if (mem.startsWith(u8, url, "https://")) 8 else 7;
+    const after_scheme = url[scheme_end..];
+    const slash_pos = mem.indexOfScalar(u8, after_scheme, '/') orelse return error.MissingPath;
+    const host = after_scheme[0..slash_pos];
+    if (host.len == 0) return error.MissingHostname;
+    return parsePath(after_scheme[slash_pos + 1 ..]);
+}
+
+fn parsePath(path: []const u8) ParseError!GitUrl {
+    const slash_pos = mem.indexOfScalar(u8, path, '/') orelse return error.MissingPath;
+    const org = path[0..slash_pos];
+    if (org.len == 0) return error.EmptyOrg;
+    var repo = path[slash_pos + 1 ..];
+    if (repo.len == 0) return error.EmptyRepo;
+    if (mem.indexOfScalar(u8, repo, '/') != null) return error.ExtraSlashes;
+    if (mem.endsWith(u8, repo, ".git")) repo = repo[0 .. repo.len - 4];
+    if (repo.len == 0) return error.EmptyRepo;
+    return GitUrl{ .org = org, .repo = repo };
+}
+
+// ---------------------------------------------------------------------------
+// Progress types — all pure
+// ---------------------------------------------------------------------------
+
+pub const Phase = enum {
+    counting,
+    compressing,
+    receiving,
+    resolving,
+
+    pub fn label(self: Phase) []const u8 {
+        return switch (self) {
+            .counting => "Counting  ",
+            .compressing => "Compressing",
+            .receiving => "Receiving ",
+            .resolving => "Resolving ",
+        };
     }
 };
 
-pub fn parseGitProgress(line: []const u8, progress: *ProgressBar) void {
-    // Git output patterns:
-    // "Counting objects: 100% (123/123)"
-    // "Compressing objects: 50% (50/100)"
-    // "Receiving objects: 75% (750/1000)"
-    // "Resolving deltas: 100% (456/456)"
+pub const ProgressState = struct {
+    total: usize,
+    current: usize,
+    phase: ?Phase,
+};
 
-    if (mem.indexOf(u8, line, "Counting objects:")) |_| {
-        progress.phase = "Counting  ";
-        if (parseGitPercentage(line)) |info| {
-            progress.current = info.current;
-            progress.total = info.total;
-        }
-    } else if (mem.indexOf(u8, line, "Compressing objects:")) |_| {
-        progress.phase = "Compressing";
-        if (parseGitPercentage(line)) |info| {
-            progress.current = info.current;
-            progress.total = info.total;
-        }
-    } else if (mem.indexOf(u8, line, "Receiving objects:")) |_| {
-        progress.phase = "Receiving ";
-        if (parseGitPercentage(line)) |info| {
-            progress.current = info.current;
-            progress.total = info.total;
-        }
-    } else if (mem.indexOf(u8, line, "Resolving deltas:")) |_| {
-        progress.phase = "Resolving ";
-        if (parseGitPercentage(line)) |info| {
-            progress.current = info.current;
-            progress.total = info.total;
-        }
-    }
-}
+pub const Display = struct {
+    phase: []const u8,
+    percent: usize,
+    current: usize,
+    total: usize,
+    filled: usize,
+    width: usize,
+};
 
-pub const GitProgressInfo = struct {
+pub const ProgressInfo = struct {
     current: usize,
     total: usize,
 };
 
-pub fn parseGitPercentage(line: []const u8) ?GitProgressInfo {
-    // Look for pattern like "(123/456)" or "(123/456, 789 bytes)"
-    const open_paren = mem.indexOf(u8, line, "(") orelse return null;
-    const close_paren = mem.indexOf(u8, line[open_paren..], ")") orelse return null;
-    const progress_str = line[open_paren + 1 .. open_paren + close_paren];
-
-    const slash = mem.indexOf(u8, progress_str, "/") orelse return null;
-
-    // Parse current
-    const current_str = mem.trim(u8, progress_str[0..slash], " ");
-    const current = std.fmt.parseInt(usize, current_str, 10) catch return null;
-
-    // Parse total (might have comma and extra info)
-    var total_str = mem.trim(u8, progress_str[slash + 1 ..], " ");
-    if (mem.indexOf(u8, total_str, ",")) |comma| {
-        total_str = total_str[0..comma];
+/// Pure: parse a line of git stderr and produce a new ProgressState.
+/// Returns the same state if the line doesn't match a git progress pattern.
+pub fn parseProgressLine(state: ProgressState, line: []const u8) ProgressState {
+    const phase = detectPhase(line) orelse return state;
+    if (parsePercentage(line)) |info| {
+        return .{ .total = info.total, .current = info.current, .phase = phase };
     }
+    return .{ .total = state.total, .current = state.current, .phase = phase };
+}
+
+fn detectPhase(line: []const u8) ?Phase {
+    if (mem.startsWith(u8, line, "Counting objects:")) return .counting;
+    if (mem.startsWith(u8, line, "Compressing objects:")) return .compressing;
+    if (mem.startsWith(u8, line, "Receiving objects:")) return .receiving;
+    if (mem.startsWith(u8, line, "Resolving deltas:")) return .resolving;
+    return null;
+}
+
+/// Pure: compute the display attributes from a ProgressState.
+pub fn stateToDisplay(state: ProgressState) Display {
+    const percent = if (state.total > 0)
+        @min(100, (state.current * 100) / state.total)
+    else
+        0;
+    const width: usize = 40;
+    const filled = (width * percent) / 100;
+    return .{
+        .phase = if (state.phase) |p| p.label() else "",
+        .percent = percent,
+        .current = state.current,
+        .total = state.total,
+        .filled = filled,
+        .width = width,
+    };
+}
+
+/// Pure: extract (current/total) from a git progress line like "(123/456)" or "(123/456, 5.2 MiB)".
+pub fn parsePercentage(line: []const u8) ?ProgressInfo {
+    const open_paren = mem.indexOfScalar(u8, line, '(') orelse return null;
+    const rest = line[open_paren + 1 ..];
+    const close_paren = mem.indexOfScalar(u8, rest, ')') orelse return null;
+    const inner = rest[0..close_paren];
+    const slash = mem.indexOfScalar(u8, inner, '/') orelse return null;
+    const current = std.fmt.parseInt(usize, mem.trim(u8, inner[0..slash], " "), 10) catch return null;
+    var total_str = mem.trim(u8, inner[slash + 1 ..], " ");
+    if (mem.indexOfScalar(u8, total_str, ',')) |comma| total_str = total_str[0..comma];
+    total_str = mem.trim(u8, total_str, " ");
     const total = std.fmt.parseInt(usize, total_str, 10) catch return null;
-
-    return GitProgressInfo{ .current = current, .total = total };
+    return .{ .current = current, .total = total };
 }
 
-const UrlParseError = struct {
-    reason: []const u8,
-    url: []const u8,
-    detected_format: ?[]const u8 = null,
-    found_at: ?[]const u8 = null,
-    expected: ?[]const u8 = null,
-};
-
-fn reportParseError(err: UrlParseError) void {
-    std.debug.print("\n", .{});
-    std.debug.print("❌ Failed to parse git URL: {s}\n", .{err.url});
-    std.debug.print("   └─ {s}\n", .{err.reason});
-
-    if (err.detected_format) |fmt| {
-        std.debug.print("   └─ Detected format: {s}\n", .{fmt});
-    }
-
-    if (err.found_at) |found| {
-        std.debug.print("   └─ Found: {s}\n", .{found});
-    }
-
-    if (err.expected) |exp| {
-        std.debug.print("   └─ Expected: {s}\n", .{exp});
-    }
-
-    std.debug.print("\n", .{});
-    std.debug.print("Valid URL formats:\n", .{});
-    std.debug.print("  SSH:   git@github.com:org/repo.git\n", .{});
-    std.debug.print("  HTTPS: https://github.com/org/repo.git\n", .{});
-    std.debug.print("  HTTP:  http://github.com/org/repo.git\n", .{});
-    std.debug.print("\n", .{});
-}
-
-pub fn parseGitUrl(allocator: mem.Allocator, url: []const u8) !GitUrl {
-    // Check if it looks like a local path
-    if (mem.indexOf(u8, url, "@") == null and
-        mem.indexOf(u8, url, "://") == null)
-    {
-        reportParseError(.{
-            .reason = "URL doesn't match any known git URL format",
-            .url = url,
-            .detected_format = "Local path or invalid format",
-            .expected = "git@host:org/repo OR https://host/org/repo",
-        });
-        return error.InvalidUrl;
-    }
-
-    // Handle SSH URLs: git@github.com:org/repo.git
-    if (mem.indexOf(u8, url, "@")) |at_pos| {
-        // Validate user part is not empty (@ cannot be at the beginning)
-        if (at_pos == 0) {
-            reportParseError(.{
-                .reason = "SSH format missing user",
-                .url = url,
-                .detected_format = "SSH",
-                .expected = "git@host:org/repo",
-            });
-            return error.InvalidUrl;
-        }
-
-        const colon_pos = mem.lastIndexOf(u8, url, ":");
-
-        if (colon_pos == null) {
-            const host_part = url[at_pos + 1 ..];
-            reportParseError(.{
-                .reason = "SSH format missing colon separator",
-                .url = url,
-                .detected_format = "SSH (git@...)",
-                .found_at = host_part,
-                .expected = "git@host:org/repo",
-            });
-            return error.InvalidUrl;
-        }
-
-        const host = url[at_pos + 1 .. colon_pos.?];
-        const path = url[colon_pos.? + 1 ..];
-
-        // Validate host is not empty
-        if (host.len == 0) {
-            reportParseError(.{
-                .reason = "SSH format missing hostname",
-                .url = url,
-                .detected_format = "SSH",
-                .expected = "git@host:org/repo",
-            });
-            return error.InvalidUrl;
-        }
-
-        if (mem.indexOf(u8, path, "/") == null) {
-            reportParseError(.{
-                .reason = "Path missing org/repo separator",
-                .url = url,
-                .detected_format = "SSH (git@host:...)",
-                .found_at = path,
-                .expected = "org/repo or org/repo.git",
-            });
-            return error.InvalidUrl;
-        }
-
-        return parsePathComponent(allocator, path) catch |err| {
-            reportParseError(.{
-                .reason = "Failed to parse org/repo from path",
-                .url = url,
-                .detected_format = "SSH",
-                .found_at = path,
-                .expected = "org/repo or org/repo.git",
-            });
-            return err;
-        };
-    }
-
-    // Handle HTTPS/HTTP URLs: https://github.com/org/repo.git
-    if (mem.startsWith(u8, url, "http://") or mem.startsWith(u8, url, "https://")) {
-        const protocol_end = mem.indexOf(u8, url, "://");
-        const protocol = if (mem.startsWith(u8, url, "https://")) "https" else "http";
-
-        if (protocol_end == null) {
-            reportParseError(.{
-                .reason = "Malformed protocol",
-                .url = url,
-                .detected_format = "HTTP/HTTPS",
-                .expected = "http:// or https://",
-            });
-            return error.InvalidUrl;
-        }
-
-        const after_protocol = url[protocol_end.? + 3 ..];
-        const slash_pos = mem.indexOf(u8, after_protocol, "/");
-
-        if (slash_pos == null) {
-            const host = after_protocol;
-            reportParseError(.{
-                .reason = "Missing path after hostname",
-                .url = url,
-                .detected_format = protocol,
-                .found_at = host,
-                .expected = "host/org/repo",
-            });
-            return error.InvalidUrl;
-        }
-
-        const host = after_protocol[0..slash_pos.?];
-        const path = after_protocol[slash_pos.? + 1 ..];
-
-        // Validate host is not empty
-        if (host.len == 0) {
-            reportParseError(.{
-                .reason = "Missing hostname",
-                .url = url,
-                .detected_format = protocol,
-                .expected = "host/org/repo",
-            });
-            return error.InvalidUrl;
-        }
-
-        if (mem.indexOf(u8, path, "/") == null) {
-            reportParseError(.{
-                .reason = "Path missing org/repo separator",
-                .url = url,
-                .detected_format = protocol,
-                .found_at = path,
-                .expected = "org/repo or org/repo.git",
-            });
-            return error.InvalidUrl;
-        }
-
-        return parsePathComponent(allocator, path) catch |err| {
-            reportParseError(.{
-                .reason = "Failed to parse org/repo from path",
-                .url = url,
-                .detected_format = protocol,
-                .found_at = path,
-                .expected = "org/repo or org/repo.git",
-            });
-            return err;
-        };
-    }
-
-    reportParseError(.{
-        .reason = "URL doesn't start with recognized protocol",
-        .url = url,
-        .expected = "git@... OR http://... OR https://...",
-    });
-    return error.InvalidUrl;
-}
-
-pub fn parsePathComponent(allocator: mem.Allocator, path: []const u8) !GitUrl {
-    // Path should be like "org/repo.git" or "org/repo"
-    const slash_pos = mem.indexOf(u8, path, "/") orelse return error.InvalidUrl;
-    const org = path[0..slash_pos];
-    var repo = path[slash_pos + 1 ..];
-
-    // Validate org is not empty
-    if (org.len == 0) return error.InvalidUrl;
-
-    // Validate repo doesn't contain additional slashes
-    if (mem.indexOf(u8, repo, "/") != null) return error.InvalidUrl;
-
-    // Remove .git suffix if present
-    if (mem.endsWith(u8, repo, ".git")) {
-        repo = repo[0 .. repo.len - 4];
-    }
-
-    // Validate repo is not empty after removing .git
-    if (repo.len == 0) return error.InvalidUrl;
-
-    return GitUrl{
-        .org = try allocator.dupe(u8, org),
-        .repo = try allocator.dupe(u8, repo),
+/// Pure: format a ParseError as a human-readable string.
+pub fn formatParseError(err: ParseError) []const u8 {
+    return switch (err) {
+        error.NotAGitUrl => "URL doesn't start with git@..., http://, or https://",
+        error.MissingUser => "SSH format missing user (expected git@host:org/repo)",
+        error.MissingHostname => "Missing hostname",
+        error.MissingColon => "SSH format missing colon separator",
+        error.MissingPath => "Missing org/repo path",
+        error.EmptyOrg => "Org is empty",
+        error.EmptyRepo => "Repo name is empty",
+        error.ExtraSlashes => "Repo path contains multiple slashes",
     };
 }
 
-fn getHome(allocator: mem.Allocator, environ_map: *std.process.Environ.Map) ![]const u8 {
-    const home = environ_map.get("HOME") orelse {
-        std.debug.print("Error: Could not get HOME environment variable\n", .{});
-        return error.EnvironmentVariableNotFound;
-    };
-    return allocator.dupe(u8, home);
+// ---------------------------------------------------------------------------
+// IO boundary — everything below does IO
+// ---------------------------------------------------------------------------
+
+pub fn reportParseError(err: ParseError) void {
+    std.debug.print(
+        \\
+        \\Failed to parse git URL
+        \\  {s}
+        \\
+        \\Valid URL formats:
+        \\  SSH:   git@github.com:org/repo.git
+        \\  HTTPS: https://github.com/org/repo.git
+        \\  HTTP:  http://github.com/org/repo.git
+        \\
+    , .{formatParseError(err)});
+}
+
+pub fn drawProgress(io: std.Io, state: ProgressState) void {
+    const d = stateToDisplay(state);
+    var buf: [256]u8 = undefined;
+    const line = std.fmt.bufPrint(&buf, "\r\x1b[K{s} [", .{d.phase}) catch unreachable;
+    _ = std.Io.File.stdout().writeStreamingAll(io, line) catch return;
+    var i: usize = 0;
+    while (i < d.filled) : (i += 1) {
+        _ = std.Io.File.stdout().writeStreamingAll(io, "█") catch return;
+    }
+    while (i < d.width) : (i += 1) {
+        _ = std.Io.File.stdout().writeStreamingAll(io, "░") catch return;
+    }
+    const suffix = std.fmt.bufPrint(&buf, "] {d}% ({d}/{d})", .{ d.percent, d.current, d.total }) catch unreachable;
+    _ = std.Io.File.stdout().writeStreamingAll(io, suffix) catch return;
+}
+
+pub fn finishProgress(io: std.Io, state: ProgressState) void {
+    drawProgress(io, state);
+    _ = std.Io.File.stdout().writeStreamingAll(io, "\n") catch return;
 }
 
 pub fn destinationExists(io: std.Io, path: []const u8) !bool {
     std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
-        else => return err,
+        else => |e| return e,
     };
     return true;
 }
 
 fn runGitCloneWithProgress(io: std.Io, url: []const u8, dest: []const u8) !void {
-    var child = try process.spawn(io, .{
+    var child = try std.process.spawn(io, .{
         .argv = &.{ "git", "clone", "--progress", url, dest },
         .stdin = .ignore,
         .stdout = .pipe,
@@ -343,28 +221,23 @@ fn runGitCloneWithProgress(io: std.Io, url: []const u8, dest: []const u8) !void 
     });
     defer child.kill(io);
 
-    var progress = ProgressBar{};
+    var state: ProgressState = .{ .total = 100, .current = 0, .phase = null };
     var buffer: [4096]u8 = undefined;
 
-    // Read stderr (where git outputs progress)
     if (child.stderr) |stderr| {
         while (true) {
             const vecs: [1][]u8 = .{buffer[0..]};
             const bytes_read = stderr.readStreaming(io, &vecs) catch break;
-
             const output = buffer[0..bytes_read];
-
-            // Split by lines and parse each one
             var iter = mem.splitSequence(u8, output, "\r");
             while (iter.next()) |line| {
                 if (line.len == 0) continue;
-                parseGitProgress(line, &progress);
-                progress.draw();
+                state = parseProgressLine(state, line);
+                drawProgress(io, state);
             }
         }
     }
 
-    // Read stdout (for any regular output)
     if (child.stdout) |stdout| {
         while (true) {
             const vecs: [1][]u8 = .{buffer[0..]};
@@ -373,7 +246,7 @@ fn runGitCloneWithProgress(io: std.Io, url: []const u8, dest: []const u8) !void 
     }
 
     const term = try child.wait(io);
-    progress.finish();
+    finishProgress(io, state);
 
     switch (term) {
         .exited => |code| {
@@ -387,7 +260,10 @@ fn runGitCloneWithProgress(io: std.Io, url: []const u8, dest: []const u8) !void 
 }
 
 pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
+    mainInner(init) catch std.process.exit(1);
+}
+
+fn mainInner(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var root_dir: ?[]const u8 = null;
@@ -415,25 +291,24 @@ pub fn main(init: std.process.Init) !void {
         return error.MissingUrl;
     }
 
-    const url = git_url.?;
-    const parsed = try parseGitUrl(allocator, url);
-    defer allocator.free(parsed.org);
-    defer allocator.free(parsed.repo);
-
-    // Determine the root directory
-    const base_path = if (root_dir) |r| try allocator.dupe(u8, r) else blk: {
-        const home = try getHome(allocator, init.environ_map);
-        defer allocator.free(home);
-        break :blk try fs.path.join(allocator, &[_][]const u8{ home, "src" });
+    const parsed = parseGitUrl(git_url.?) catch |err| {
+        reportParseError(err);
+        return error.InvalidUrl;
     };
-    defer allocator.free(base_path);
 
-    // Build the full path: root/org/repo
-    const org_path = try fs.path.join(allocator, &[_][]const u8{ base_path, parsed.org });
-    defer allocator.free(org_path);
+    const home = init.environ_map.get("HOME") orelse {
+        std.debug.print("Error: Could not get HOME environment variable\n", .{});
+        return error.EnvironmentVariableNotFound;
+    };
 
-    const full_path = try fs.path.join(allocator, &[_][]const u8{ org_path, parsed.repo });
-    defer allocator.free(full_path);
+    const arena = init.arena;
+    const base_path = if (root_dir) |r|
+        try arena.allocator().dupe(u8, r)
+    else
+        try std.fs.path.join(arena.allocator(), &[_][]const u8{ home, "src" });
+
+    const org_path = try std.fs.path.join(arena.allocator(), &[_][]const u8{ base_path, parsed.org });
+    const full_path = try std.fs.path.join(arena.allocator(), &[_][]const u8{ org_path, parsed.repo });
 
     const dest_exists = destinationExists(init.io, full_path) catch |err| {
         std.debug.print("Error checking destination {s}: {}\n", .{ full_path, err });
@@ -446,15 +321,12 @@ pub fn main(init: std.process.Init) !void {
         return error.DestinationExists;
     }
 
-    // Create directories if they don't exist
     std.Io.Dir.cwd().createDirPath(init.io, org_path) catch |err| {
         std.debug.print("Error creating directory {s}: {}\n", .{ org_path, err });
         return err;
     };
 
-    std.debug.print("Cloning {s} into {s}\n", .{ url, full_path });
-
-    try runGitCloneWithProgress(init.io, url, full_path);
-
+    std.debug.print("Cloning {s} into {s}\n", .{ git_url.?, full_path });
+    try runGitCloneWithProgress(init.io, git_url.?, full_path);
     std.debug.print("Successfully cloned to {s}\n", .{full_path});
 }

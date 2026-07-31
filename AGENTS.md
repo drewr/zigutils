@@ -9,17 +9,9 @@
 
 ### With Nix (recommended)
 
-Enter the development shell and build:
-
 ```bash
 nix develop
 zig build
-```
-
-Or build and run in one step:
-
-```bash
-nix develop -c zig build run
 ```
 
 ### With bare Zig
@@ -30,12 +22,10 @@ zig build
 
 ## Running
 
-Build and run a specific binary:
-
 ```bash
-zig build run               # runs the default app (gitclone)
-zig build run -Dapp=gitclone
-zig build run -Dapp=nix-zsh-env
+zig build run                # runs gitclone
+zig build run-gitclone       # runs gitclone
+zig build run-nix-zsh-env    # runs nix-zsh-env
 ```
 
 ## Testing

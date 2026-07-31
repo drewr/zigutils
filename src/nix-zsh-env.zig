@@ -1,75 +1,55 @@
 const std = @import("std");
+const mem = std.mem;
+
+/// Pure: extract a package name from a Nix store path like
+/// "/nix/store/<hash>-<package-name>". Returns null if the path
+/// is not a Nix store path or can't be parsed.
+fn extractPackage(path: []const u8) ?[]const u8 {
+    const prefix = "/nix/store/";
+    const rest = if (mem.startsWith(u8, path, prefix)) path[prefix.len..] else return null;
+    const dash = mem.indexOfScalar(u8, rest, '-') orelse return null;
+    return stripVersion(rest[dash + 1 ..]);
+}
+
+/// Pure: strip version suffixes from a package name.
+/// Stops at "-<digit>" or "-dev".
+fn stripVersion(name: []const u8) []const u8 {
+    for (name, 0..) |c, i| {
+        if (c == '-' and i + 1 < name.len) {
+            const next = name[i + 1];
+            if (next >= '0' and next <= '9') return name[0..i];
+            if (mem.startsWith(u8, name[i + 1 ..], "dev")) return name[0..i];
+        }
+    }
+    return name;
+}
 
 pub fn main(init: std.process.Init) !void {
-    // Get the buildInputs environment variable (contains explicitly requested packages)
-    // If buildInputs is not set, we're not in a nix-shell, just exit silently
     const build_inputs = init.environ_map.get("buildInputs") orelse return;
 
-    // Split buildInputs by space
-    var input_iter = std.mem.splitScalar(u8, build_inputs, ' ');
+    var iter = mem.splitScalar(u8, build_inputs, ' ');
+    var packages: [5][]const u8 = undefined;
+    var count: usize = 0;
 
-    // Use fixed array since we only need up to 5 packages
-    var nix_packages: [5][]const u8 = undefined;
-    var package_count: usize = 0;
-
-    // Iterate through each build input path
-    while (input_iter.next()) |input_path| {
-        // Skip empty entries
-        if (input_path.len == 0) continue;
-
-        // Check if this path is from /nix/store
-        if (std.mem.startsWith(u8, input_path, "/nix/store/")) {
-            // Extract the package name from the path
-            // Format: /nix/store/<hash>-<package-name>
-            const after_store = input_path["/nix/store/".len..];
-
-            // Split by '-' to separate hash from package name
-            // Format: <hash>-<package-name>
-            if (std.mem.indexOfScalar(u8, after_store, '-')) |dash_pos| {
-                const package_name = after_store[dash_pos + 1..];
-
-                // Strip version number and suffixes (everything after first '-' followed by a digit or 'dev')
-                var name_without_version = package_name;
-                for (package_name, 0..) |c, idx| {
-                    if (c == '-' and idx + 1 < package_name.len) {
-                        const next_char = package_name[idx + 1];
-                        if ((next_char >= '0' and next_char <= '9') or
-                            std.mem.startsWith(u8, package_name[idx + 1..], "dev")) {
-                            name_without_version = package_name[0..idx];
-                            break;
-                        }
-                    }
-                }
-
-                nix_packages[package_count] = name_without_version;
-                package_count += 1;
-
-                // Stop after collecting 5 packages
-                if (package_count >= 5) {
-                    break;
-                }
-            }
+    while (iter.next()) |path| {
+        if (path.len == 0) continue;
+        if (extractPackage(path)) |pkg| {
+            packages[count] = pkg;
+            count += 1;
+            if (count >= 5) break;
         }
     }
 
-    // Build and write output
-    if (package_count > 0) {
-        // Use a fixed buffer for output (should be plenty for 5 package names)
-        var output_buf: [1024]u8 = undefined;
-        var output_len: usize = 0;
-
-        for (nix_packages[0..package_count], 0..) |package, i| {
-            if (i > 0) {
-                output_buf[output_len] = ':';
-                output_len += 1;
-            }
-            @memcpy(output_buf[output_len..][0..package.len], package);
-            output_len += package.len;
+    if (count > 0) {
+        var buf: [1024]u8 = undefined;
+        var pos: usize = 0;
+        for (packages[0..count], 0..) |pkg, i| {
+            if (i > 0) { buf[pos] = ':'; pos += 1; }
+            @memcpy(buf[pos..][0..pkg.len], pkg);
+            pos += pkg.len;
         }
-
-        output_buf[output_len] = '\n';
-        output_len += 1;
-
-        try std.Io.File.stdout().writeStreamingAll(init.io, output_buf[0..output_len]);
+        buf[pos] = '\n';
+        pos += 1;
+        try std.Io.File.stdout().writeStreamingAll(init.io, buf[0..pos]);
     }
 }
