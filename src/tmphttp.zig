@@ -18,14 +18,30 @@ const DEFAULT_CONTENT =
     \\<!doctype html>
     \\<html lang="en">
     \\<head><meta charset="utf-8"><title>tmphttp</title>
+    \\<script src="/htmx.min.js"></script>
     \\<style>body{font-family:system-ui,sans-serif;margin:4rem auto;max-width:36rem;padding:0 1rem;color:#222}
-    \\h1{font-size:1.8rem}code{background:#f4f4f5;padding:.15rem .4rem;border-radius:4px}</style>
+    \\h1{font-size:1.8rem}code{background:#f4f4f5;padding:.15rem .4rem;border-radius:4px}
+    \\.stats{background:#f8f8fa;border:1px solid #e4e4e7;border-radius:8px;padding:1rem;margin:1rem 0;line-height:1.9}
+     \\.row{display:block}
+     \\.n,.ip,.t,.dir{font-weight:600;font-variant-numeric:tabular-nums}
+     \\.dir{font-family:monospace;word-break:break-all}</style>
     \\</head>
     \\<body>
-    \\<h1>It works!</h1>
-    \\<p>This page is being served from a temporary directory by <code>tmphttp</code>.</p>
+    \\<h1>tmphttp</h1>
+    \\<div id="stats" class="stats"
+    \\     hx-get="/counter" hx-trigger="load, every 1s" hx-swap="innerHTML">
+     \\  <span class="row">Requests: <span class="n">0</span></span>
+     \\  <span class="row">Your IP: <span class="ip">&hellip;</span></span>
+     \\  <span class="row">Server time (UTC): <span class="t">&hellip;</span></span>
+     \\  <span class="row">Serving dir: <span class="dir">&hellip;</span></span>
+     \\  <span class="row">Port: <span class="port">&hellip;</span></span>
+    \\</div>
+    \\<p><small>Auto-refreshes every second.</small></p>
     \\</body></html>
 ;
+
+/// Vendored htmx (v1.9.12, MIT) so tmphttp is fully self-contained.
+const htmx_js: []const u8 = @embedFile("htmx.min.js");
 
 const Log = struct {
     const Cap = 300;
@@ -95,25 +111,16 @@ const State = struct {
     cols: u16 = 80,
 };
 
-/// Format a UTC timestamp (YYYY-MM-DDTHH:MM:SSZ) followed by the elapsed time
-/// since server start (MM:SS), as "[<utc> <mm:ss>]".
-fn fmtElapsed(state: *const State, out: []u8) []const u8 {
+/// Format the current UTC wall-clock time as "YYYY-MM-DDTHH:MM:SSZ".
+fn formatUtc(state: *const State, out: []u8) []const u8 {
     const wall = std.Io.Timestamp.now(state.io, .real);
-    const awake = std.Io.Timestamp.now(state.io, .awake);
-
-    const elapsed_s: i96 = @divTrunc(awake.nanoseconds - state.start.nanoseconds, std.time.ns_per_s);
-
     const epoch_secs: u64 = @intCast(@divTrunc(wall.nanoseconds, std.time.ns_per_s));
     const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
     const ymd = epoch.getEpochDay().calculateYearDay();
     const mon_day = ymd.calculateMonthDay();
     const tod = epoch.getDaySeconds();
-
-    var dur: [8]u8 = undefined;
-    const duration = fmtElapsedTime(elapsed_s, &dur);
-
     return std.fmt.bufPrint(out,
-        "[{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z {s}]",
+        "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z",
         .{
             ymd.year,
             mon_day.month.numeric(),
@@ -121,9 +128,23 @@ fn fmtElapsed(state: *const State, out: []u8) []const u8 {
             tod.getHoursIntoDay(),
             tod.getMinutesIntoHour(),
             tod.getSecondsIntoMinute(),
-            duration,
         },
-    ) catch "[??-??-??T??:??:??Z ??]";
+    ) catch "????-??-??T??:??:??Z";
+}
+
+/// Format a UTC timestamp (YYYY-MM-DDTHH:MM:SSZ) followed by the elapsed time
+/// since server start (MM:SS), as "[<utc> <mm:ss>]".
+fn fmtElapsed(state: *const State, out: []u8) []const u8 {
+    const awake = std.Io.Timestamp.now(state.io, .awake);
+    const elapsed_s: i96 = @divTrunc(awake.nanoseconds - state.start.nanoseconds, std.time.ns_per_s);
+
+    var wall_buf: [32]u8 = undefined;
+    const wall = formatUtc(state, &wall_buf);
+
+    var dur: [8]u8 = undefined;
+    const duration = fmtElapsedTime(elapsed_s, &dur);
+
+    return std.fmt.bufPrint(out, "[{s} {s}]", .{ wall, duration }) catch "[??-??-??T??:??:??Z ??]";
 }
 
 /// Format elapsed seconds as zero-padded MM:SS (e.g. "05", "63" for > 1 min).
@@ -132,6 +153,44 @@ fn fmtElapsedTime(seconds: i96, out: []u8) []const u8 {
     const mm: u64 = @intCast(@divTrunc(t, 60));
     const ss: u64 = @intCast(@rem(t, 60));
     return std.fmt.bufPrint(out, "{d:0>2}:{d:0>2}", .{ mm, ss }) catch "00:00";
+}
+
+/// Format the source (peer) IP of a connection into `out`.
+fn formatIp(addr: net.IpAddress, out: []u8) []const u8 {
+    return switch (addr) {
+        .ip4 => |a| std.fmt.bufPrint(out, "{d}.{d}.{d}.{d}", .{ a.bytes[0], a.bytes[1], a.bytes[2], a.bytes[3] }) catch "?",
+        .ip6 => |a| {
+            var i: usize = 0;
+            var n: usize = 0;
+            while (i < 16) : (i += 2) {
+                if (i != 0) {
+                    if (n >= out.len) return "?";
+                    out[n] = ':';
+                    n += 1;
+                }
+                if (n + 4 > out.len) return "?";
+                _ = std.fmt.bufPrint(out[n .. n + 4], "{x:0>2}{x:0>2}", .{ a.bytes[i], a.bytes[i + 1] }) catch return "?";
+                n += 4;
+            }
+            return out[0..n];
+        },
+    };
+}
+
+/// Build the HTML fragment returned by `/counter`: the request count, the
+/// source IP, the current UTC server time, the served directory, and the port.
+fn counterFragment(state: *const State, src_ip: []const u8, out: []u8) []const u8 {
+    const count = state.requests.load(.monotonic);
+    var t_buf: [32]u8 = undefined;
+    const t = formatUtc(state, &t_buf);
+    return std.fmt.bufPrint(out,
+        "<span class=\"row\">Requests: <span class=\"n\">{d}</span></span>" ++
+            "<span class=\"row\">Your IP: <span class=\"ip\">{s}</span></span>" ++
+            "<span class=\"row\">Server time (UTC): <span class=\"t\">{s}</span></span>" ++
+            "<span class=\"row\">Serving dir: <span class=\"dir\">{s}</span></span>" ++
+            "<span class=\"row\">Port: <span class=\"port\">{d}</span></span>",
+        .{ count, src_ip, t, state.serve_path, state.cfg.port },
+    ) catch "error";
 }
 
 fn contentType(path: []const u8) []const u8 {
@@ -160,14 +219,14 @@ fn sanitizePath(target: []const u8) ?[]const u8 {
     return t;
 }
 
-fn logRequest(state: *State, method: std.http.Method, target: []const u8, status: u16, bytes: ?u64) void {
+fn logRequest(state: *State, method: std.http.Method, target: []const u8, status: u16, bytes: ?u64, src_ip: []const u8) void {
     var ts_buf: [64]u8 = undefined;
     const ts = fmtElapsed(state, &ts_buf);
     const m = @tagName(method);
     if (bytes) |b| {
-        state.log.appendFmt(state.io, "{s} {s} {s} -> {d} ({d}B)", .{ ts, m, target, status, b });
+        state.log.appendFmt(state.io, "{s} {s} {s} {s} -> {d} ({d}B)", .{ ts, src_ip, m, target, status, b });
     } else {
-        state.log.appendFmt(state.io, "{s} {s} {s} -> {d}", .{ ts, m, target, status });
+        state.log.appendFmt(state.io, "{s} {s} {s} {s} -> {d}", .{ ts, src_ip, m, target, status });
     }
     state.dirty.store(true, .seq_cst);
 }
@@ -178,6 +237,9 @@ fn handleConnection(state: *State, stream: net.Stream) void {
         var copy = stream;
         copy.close(io);
     }
+
+    var ip_buf: [64]u8 = undefined;
+    const src_ip = formatIp(stream.socket.address, &ip_buf);
 
     var send_buffer: [16384]u8 = undefined;
     var recv_buffer: [16384]u8 = undefined;
@@ -199,7 +261,24 @@ fn handleConnection(state: *State, stream: net.Stream) void {
                 .status = .forbidden,
                 .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
             }) catch {};
-            logRequest(state, method, target, 403, null);
+            logRequest(state, method, target, 403, null, src_ip);
+            continue;
+        }
+
+        // Dynamic routes: HTMX library and the live counter. These are served
+        // in-memory (not from the temp dir) and do NOT increment the counter.
+        if (mem.eql(u8, sub.?, "htmx.min.js")) {
+            request.respond(htmx_js, .{
+                .extra_headers = &.{.{ .name = "Content-Type", .value = "application/javascript" }},
+            }) catch {};
+            continue;
+        }
+        if (mem.eql(u8, sub.?, "counter")) {
+            var frag_buf: [512]u8 = undefined;
+            const frag = counterFragment(state, src_ip, &frag_buf);
+            request.respond(frag, .{
+                .extra_headers = &.{.{ .name = "Content-Type", .value = "text/html; charset=utf-8" }},
+            }) catch {};
             continue;
         }
 
@@ -214,7 +293,7 @@ fn handleConnection(state: *State, stream: net.Stream) void {
                 .status = status,
                 .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
             }) catch {};
-            logRequest(state, method, target, if (not_found) 404 else 500, null);
+            logRequest(state, method, target, if (not_found) 404 else 500, null, src_ip);
             continue;
         };
         defer state.gpa.free(file_contents);
@@ -224,7 +303,7 @@ fn handleConnection(state: *State, stream: net.Stream) void {
         }) catch {};
 
         _ = state.requests.fetchAdd(1, .monotonic);
-        logRequest(state, method, target, 200, file_contents.len);
+        logRequest(state, method, target, 200, file_contents.len, src_ip);
     }
 }
 

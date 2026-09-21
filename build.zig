@@ -63,4 +63,16 @@ pub fn build(b: *std.Build) !void {
     });
     const run_test = b.addRunArtifact(gitclone_test_exe);
     test_step.dependOn(&run_test.step);
+
+    const tmphttp_test = b.addExecutable(.{
+        .name = "tmphttp_test",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tmphttp_test.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    const run_tmphttp_test = b.addRunArtifact(tmphttp_test);
+    run_tmphttp_test.addArtifactArg(tmphttp);
+    test_step.dependOn(&run_tmphttp_test.step);
 }
