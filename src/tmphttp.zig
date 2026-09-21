@@ -575,7 +575,10 @@ pub fn main(init: std.process.Init) !void {
 
     // Bind the TCP listener.
     const address = try net.IpAddress.parse(cfg.host, cfg.port);
-    var tcp_server = try address.listen(io, .{ .reuse_address = true });
+    var tcp_server = address.listen(io, .{}) catch |err| {
+        std.debug.print("failed to bind {s}:{d}: {s} (is another process already using this port?)\n", .{ cfg.host, cfg.port, @errorName(err) });
+        std.process.exit(1);
+    };
     defer tcp_server.deinit(io);
 
     // If running in tmux, set the window title to host:port.
