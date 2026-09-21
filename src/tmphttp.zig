@@ -33,7 +33,6 @@ const DEFAULT_CONTENT =
      \\  <span class="row">Requests: <span class="n">0</span></span>
      \\  <span class="row">Your IP: <span class="ip">&hellip;</span></span>
      \\  <span class="row">Server time (UTC): <span class="t">&hellip;</span></span>
-     \\  <span class="row">Serving dir: <span class="dir">&hellip;</span></span>
      \\  <span class="row">Port: <span class="port">&hellip;</span></span>
     \\</div>
     \\<p><small>Auto-refreshes every second.</small></p>
@@ -93,14 +92,19 @@ const Config = struct {
     host: []const u8,
     port: u16,
     content: []const u8,
+    /// When set, serve this existing directory from disk instead of the default
+    /// in-memory index.html page.
+    dir: ?[]const u8 = null,
 };
 
 const State = struct {
     io: Io,
     gpa: Allocator,
     cfg: Config,
-    serve_dir: Io.Dir,
-    serve_path: []const u8,
+    /// The directory being served from disk, when `-d/--dir` is used.
+    serve_dir: ?Io.Dir = null,
+    /// Absolute path of the served directory (only when `serve_dir` is set).
+    serve_path: ?[]const u8 = null,
     log: Log,
     requests: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     dirty: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
@@ -178,38 +182,42 @@ fn formatIp(addr: net.IpAddress, out: []u8) []const u8 {
 }
 
 /// Build the HTML fragment returned by `/counter`: the request count, the
-/// source IP, the current UTC server time, the served directory, and the port.
+/// source IP, the current UTC server time, and the port.
 fn counterFragment(state: *const State, src_ip: []const u8, out: []u8) []const u8 {
     const count = state.requests.load(.monotonic);
     var t_buf: [32]u8 = undefined;
     const t = formatUtc(state, &t_buf);
-    return std.fmt.bufPrint(out,
-        "<span class=\"row\">Requests: <span class=\"n\">{d}</span></span>" ++
-            "<span class=\"row\">Your IP: <span class=\"ip\">{s}</span></span>" ++
-            "<span class=\"row\">Server time (UTC): <span class=\"t\">{s}</span></span>" ++
-            "<span class=\"row\">Serving dir: <span class=\"dir\">{s}</span></span>" ++
-            "<span class=\"row\">Port: <span class=\"port\">{d}</span></span>",
-        .{ count, src_ip, t, state.serve_path, state.cfg.port },
-    ) catch "error";
+    var n: usize = 0;
+    n += (std.fmt.bufPrint(out[n..], "<span class=\"row\">Requests: <span class=\"n\">{d}</span></span>", .{count}) catch return "error").len;
+    n += (std.fmt.bufPrint(out[n..], "<span class=\"row\">Your IP: <span class=\"ip\">{s}</span></span>", .{src_ip}) catch return "error").len;
+    n += (std.fmt.bufPrint(out[n..], "<span class=\"row\">Server time (UTC): <span class=\"t\">{s}</span></span>", .{t}) catch return "error").len;
+    if (state.serve_path) |p| {
+        n += (std.fmt.bufPrint(out[n..], "<span class=\"row\">Serving dir: <span class=\"dir\">{s}</span></span>", .{p}) catch return "error").len;
+    }
+    n += (std.fmt.bufPrint(out[n..], "<span class=\"row\">Port: <span class=\"port\">{d}</span></span>", .{state.cfg.port}) catch return "error").len;
+    return out[0..n];
 }
 
+/// Map a file extension to a Content-Type header value. Defaults to a binary
+/// fallback since extensionless paths (e.g. `/README`) may hold arbitrary data.
 fn contentType(path: []const u8) []const u8 {
-    const ext = fs.path.extension(path);
+    const ext = std.fs.path.extension(path);
     if (mem.eql(u8, ext, ".html") or mem.eql(u8, ext, ".htm")) return "text/html; charset=utf-8";
+    if (mem.eql(u8, ext, ".js")) return "application/javascript";
     if (mem.eql(u8, ext, ".css")) return "text/css; charset=utf-8";
-    if (mem.eql(u8, ext, ".js") or mem.eql(u8, ext, ".mjs")) return "application/javascript";
-    if (mem.eql(u8, ext, ".json") or mem.eql(u8, ext, ".map")) return "application/json";
+    if (mem.eql(u8, ext, ".json")) return "application/json";
+    if (mem.eql(u8, ext, ".svg")) return "image/svg+xml";
     if (mem.eql(u8, ext, ".png")) return "image/png";
     if (mem.eql(u8, ext, ".jpg") or mem.eql(u8, ext, ".jpeg")) return "image/jpeg";
     if (mem.eql(u8, ext, ".gif")) return "image/gif";
-    if (mem.eql(u8, ext, ".svg")) return "image/svg+xml";
+    if (mem.eql(u8, ext, ".webp")) return "image/webp";
     if (mem.eql(u8, ext, ".ico")) return "image/x-icon";
-    if (mem.eql(u8, ext, ".wasm")) return "application/wasm";
     if (mem.eql(u8, ext, ".txt")) return "text/plain; charset=utf-8";
+    if (mem.eql(u8, ext, ".md")) return "text/plain; charset=utf-8";
     return "application/octet-stream";
 }
 
-/// Maps a request target to a relative path inside the serve dir.
+/// Maps a request target to the in-memory document name ("index.html").
 /// Returns `null` for path traversal.
 fn sanitizePath(target: []const u8) ?[]const u8 {
     var t = target;
@@ -282,28 +290,48 @@ fn handleConnection(state: *State, stream: net.Stream) void {
             continue;
         }
 
-        const file_contents = state.serve_dir.readFileAlloc(io, sub.?, state.gpa, .limited(100 * 1024 * 1024)) catch |err| {
-            const not_found = switch (err) {
-                error.FileNotFound, error.AccessDenied => true,
-                else => false,
+        // Static content: either served from the configured directory on disk,
+        // or (by default) the in-memory index.html body supplied at startup.
+        if (state.serve_dir) |dir| {
+            const file_contents = dir.readFileAlloc(io, sub.?, state.gpa, .limited(100 * 1024 * 1024)) catch |err| {
+                const not_found = switch (err) {
+                    error.FileNotFound, error.AccessDenied => true,
+                    else => false,
+                };
+                const body: []const u8 = if (not_found) "not found" else "server error";
+                const status: std.http.Status = if (not_found) .not_found else .internal_server_error;
+                request.respond(body, .{
+                    .status = status,
+                    .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
+                }) catch {};
+                logRequest(state, method, target, if (not_found) 404 else 500, null, src_ip);
+                continue;
             };
-            const body: []const u8 = if (not_found) "not found" else "server error";
-            const status: std.http.Status = if (not_found) .not_found else .internal_server_error;
-            request.respond(body, .{
-                .status = status,
-                .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
+            defer state.gpa.free(file_contents);
+
+            request.respond(file_contents, .{
+                .extra_headers = &.{.{ .name = "Content-Type", .value = contentType(sub.?) }},
             }) catch {};
-            logRequest(state, method, target, if (not_found) 404 else 500, null, src_ip);
-            continue;
-        };
-        defer state.gpa.free(file_contents);
 
-        request.respond(file_contents, .{
-            .extra_headers = &.{.{ .name = "Content-Type", .value = contentType(sub.?) }},
-        }) catch {};
+            _ = state.requests.fetchAdd(1, .monotonic);
+            logRequest(state, method, target, 200, file_contents.len, src_ip);
+        } else {
+            if (!mem.eql(u8, sub.?, "index.html")) {
+                request.respond("not found", .{
+                    .status = .not_found,
+                    .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
+                }) catch {};
+                logRequest(state, method, target, 404, null, src_ip);
+                continue;
+            }
 
-        _ = state.requests.fetchAdd(1, .monotonic);
-        logRequest(state, method, target, 200, file_contents.len, src_ip);
+            request.respond(state.cfg.content, .{
+                .extra_headers = &.{.{ .name = "Content-Type", .value = "text/html; charset=utf-8" }},
+            }) catch {};
+
+            _ = state.requests.fetchAdd(1, .monotonic);
+            logRequest(state, method, target, 200, state.cfg.content.len, src_ip);
+        }
     }
 }
 
@@ -373,8 +401,13 @@ fn render(state: *State, rows: u16, cols: u16, header_lines: u16) void {
 
     line = std.fmt.bufPrint(&buf, " URL   \x1b[4mhttp://{s}:{d}/\x1b[0m\n", .{ state.cfg.host, state.cfg.port }) catch return;
     stdout.writeStreamingAll(io, line) catch {};
-    line = std.fmt.bufPrint(&buf, " DIR   {s}\n", .{state.serve_path}) catch return;
-    stdout.writeStreamingAll(io, line) catch {};
+    if (state.serve_path) |p| {
+        line = std.fmt.bufPrint(&buf, " DIR   {s}\n", .{p}) catch return;
+        stdout.writeStreamingAll(io, line) catch {};
+    } else {
+        line = std.fmt.bufPrint(&buf, " DIR   (in-memory)\n", .{}) catch return;
+        stdout.writeStreamingAll(io, line) catch {};
+    }
     const reqs = state.requests.load(.monotonic);
     line = std.fmt.bufPrint(&buf, " REQS  {d}   Ctrl-C to quit\n", .{reqs}) catch return;
     stdout.writeStreamingAll(io, line) catch {};
@@ -411,11 +444,12 @@ fn installSigint() void {
 }
 
 fn usage() void {
-    std.debug.print("tmphttp - serve a temp-dir over HTTP with a live TUI\n", .{});
+    std.debug.print("tmphttp - serve a temp-dir (or in-memory page) over HTTP with a live TUI\n", .{});
     std.debug.print("\nUsage: tmphttp [options] [content]\n", .{});
     std.debug.print("\nOptions:\n", .{});
     std.debug.print("  -p, --port <port>      Port to listen on               (default 8888)\n", .{});
     std.debug.print("  -H, --host <host>      Interface/address to bind to    (default 127.0.0.1)\n", .{});
+    std.debug.print("  -d, --dir <path>       Serve an existing directory from disk\n", .{});
     std.debug.print("  -c, --content <html>   Contents for index.html         (default: placeholder)\n", .{});
     std.debug.print("  -f, --file <path>      Read index.html contents from a file\n", .{});
     std.debug.print("  --no-tui               Run without the full-screen TUI\n", .{});
@@ -466,6 +500,10 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.len) return error.MissingHost;
             cfg.host = args[i];
+        } else if (mem.eql(u8, arg, "-d") or mem.eql(u8, arg, "--dir")) {
+            i += 1;
+            if (i >= args.len) return error.MissingDir;
+            cfg.dir = args[i];
         } else if (mem.eql(u8, arg, "-c") or mem.eql(u8, arg, "--content")) {
             i += 1;
             if (i >= args.len) return error.MissingContent;
@@ -487,36 +525,15 @@ pub fn main(init: std.process.Init) !void {
 
     const tmux = init.environ_map.get("TMUX") != null;
 
-    // Create a unique temp working directory.
-    const tmp_base = init.environ_map.get("TMPDIR") orelse "/tmp";
-    var tmp_root = try std.Io.Dir.openDirAbsolute(io, tmp_base, .{});
-    defer tmp_root.close(io);
-
-    var dir_name_buf: [80]u8 = undefined;
-    var dir_name: []const u8 = undefined;
-    var random_bytes: [8]u8 = undefined;
-    while (true) {
-        io.random(&random_bytes);
-        const rand_u64 = std.mem.readInt(u64, &random_bytes, .little);
-        const name = std.fmt.bufPrint(&dir_name_buf, "tmphttp-{x}", .{rand_u64}) catch "tmphttp-tmp";
-        dir_name = name;
-        if (tmp_root.createDir(io, name, .default_dir)) {
-            break;
-        } else |err| switch (err) {
-            error.PathAlreadyExists => continue,
-            else => return err,
-        }
+    // When a directory is provided, serve it from disk. Otherwise the default
+    // in-memory index.html page is served (no temp dir is created).
+    var serve_dir: ?Io.Dir = null;
+    var serve_path: ?[]const u8 = null;
+    if (cfg.dir) |dir| {
+        const d = std.Io.Dir.cwd().openDir(io, dir, .{}) catch return error.CannotOpenDir;
+        serve_dir = d;
+        serve_path = try std.Io.Dir.cwd().realPathFileAlloc(io, dir, arena);
     }
-
-    var serve_dir = try tmp_root.openDir(io, dir_name, .{});
-    defer serve_dir.close(io);
-
-    const serve_path = try tmp_root.realPathFileAlloc(io, dir_name, arena);
-
-    // Write index.html.
-    var index_file = try serve_dir.createFile(io, "index.html", .{ .truncate = true });
-    defer index_file.close(io);
-    try index_file.writeStreamingAll(io, cfg.content);
 
     var state: State = .{
         .io = io,
@@ -529,10 +546,15 @@ pub fn main(init: std.process.Init) !void {
         .environ = init.environ_map,
         .start = std.Io.Timestamp.now(io, .awake),
     };
+    defer if (serve_dir) |*d| d.close(io);
     defer state.log.deinit(gpa);
 
-    state.log.appendFmt(io, "Serving {s} at http://{s}:{d}/", .{ serve_path, cfg.host, cfg.port });
-    state.log.appendFmt(io, "Press Ctrl-C to stop. Temp dir kept after exit.", .{});
+    if (serve_path) |p| {
+        state.log.appendFmt(io, "Serving {s} at http://{s}:{d}/", .{ p, cfg.host, cfg.port });
+    } else {
+        state.log.appendFmt(io, "Serving in-memory page at http://{s}:{d}/", .{ cfg.host, cfg.port });
+    }
+    state.log.appendFmt(io, "Press Ctrl-C to stop.", .{});
 
     // Bind the TCP listener.
     const address = try net.IpAddress.parse(cfg.host, cfg.port);
@@ -552,7 +574,7 @@ pub fn main(init: std.process.Init) !void {
         }
         _ = serve_future.cancel(io) catch {};
         _ = serve_future.await(io) catch {};
-        std.debug.print("Stopped. Temp dir kept at: {s}\n", .{serve_path});
+        std.debug.print("Stopped.\n", .{});
         return;
     }
 
@@ -566,5 +588,5 @@ pub fn main(init: std.process.Init) !void {
     _ = serve_future.await(io) catch {};
 
     ctxExit(io);
-    std.debug.print("Stopped. Temp dir kept at: {s}\n", .{serve_path});
+    std.debug.print("Stopped.\n", .{});
 }
