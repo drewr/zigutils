@@ -1,0 +1,491 @@
+const std = @import("std");
+const mem = std.mem;
+const fs = std.fs;
+const process = std.process;
+const Io = std.Io;
+const net = Io.net;
+const posix = std.posix;
+
+var g_stop = std.atomic.Value(bool).init(false);
+
+const Allocator = std.mem.Allocator;
+
+fn onSigint(_: posix.SIG) callconv(.c) void {
+    g_stop.store(true, .seq_cst);
+}
+
+const DEFAULT_CONTENT =
+    \\<!doctype html>
+    \\<html lang="en">
+    \\<head><meta charset="utf-8"><title>tmphttp</title>
+    \\<style>body{font-family:system-ui,sans-serif;margin:4rem auto;max-width:36rem;padding:0 1rem;color:#222}
+    \\h1{font-size:1.8rem}code{background:#f4f4f5;padding:.15rem .4rem;border-radius:4px}</style>
+    \\</head>
+    \\<body>
+    \\<h1>It works!</h1>
+    \\<p>This page is being served from a temporary directory by <code>tmphttp</code>.</p>
+    \\</body></html>
+;
+
+const Log = struct {
+    const Cap = 300;
+    const MaxLine = 256;
+
+    mutex: Io.Mutex = .init,
+    buf: []LogLine,
+    head: usize = 0,
+    len: usize = 0,
+
+    const LogLine = struct {
+        len: usize = 0,
+        bytes: [MaxLine]u8 = undefined,
+    };
+
+    fn init(allocator: Allocator) !Log {
+        return .{ .buf = try allocator.alloc(LogLine, Cap) };
+    }
+
+    fn deinit(self: *Log, allocator: Allocator) void {
+        allocator.free(self.buf);
+    }
+
+    fn append(self: *Log, io: Io, line: []const u8) void {
+        self.mutex.lock(io) catch return;
+        defer self.mutex.unlock(io);
+        const n = @min(line.len, MaxLine);
+        const slot = &self.buf[self.head];
+        slot.len = n;
+        @memcpy(slot.bytes[0..n], line[0..n]);
+        self.head = (self.head + 1) % Cap;
+        if (self.len < Cap) self.len += 1;
+    }
+
+    fn appendFmt(self: *Log, io: Io, comptime fmt: []const u8, args: anytype) void {
+        var buf: [MaxLine]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, fmt, args) catch return;
+        self.append(io, line);
+    }
+
+    fn get(self: *Log, index: usize) []const u8 {
+        const start = (self.head + Cap - self.len) % Cap;
+        const slot = &self.buf[(start + index) % Cap];
+        return slot.bytes[0..slot.len];
+    }
+};
+
+const Config = struct {
+    host: []const u8,
+    port: u16,
+    content: []const u8,
+};
+
+const State = struct {
+    io: Io,
+    gpa: Allocator,
+    cfg: Config,
+    serve_dir: Io.Dir,
+    serve_path: []const u8,
+    log: Log,
+    requests: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    dirty: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+    tmux: bool,
+    environ: *std.process.Environ.Map,
+    start: std.Io.Timestamp,
+    rows: u16 = 24,
+    cols: u16 = 80,
+};
+
+/// Format a UTC timestamp (YYYY-MM-DDTHH:MM:SSZ) followed by the elapsed time
+/// since server start (MM:SS), as "[<utc> <mm:ss>]".
+fn fmtElapsed(state: *const State, out: []u8) []const u8 {
+    const wall = std.Io.Timestamp.now(state.io, .real);
+    const awake = std.Io.Timestamp.now(state.io, .awake);
+
+    const elapsed_s: i96 = @divTrunc(awake.nanoseconds - state.start.nanoseconds, std.time.ns_per_s);
+
+    const epoch_secs: u64 = @intCast(@divTrunc(wall.nanoseconds, std.time.ns_per_s));
+    const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
+    const ymd = epoch.getEpochDay().calculateYearDay();
+    const mon_day = ymd.calculateMonthDay();
+    const tod = epoch.getDaySeconds();
+
+    var dur: [8]u8 = undefined;
+    const duration = fmtElapsedTime(elapsed_s, &dur);
+
+    return std.fmt.bufPrint(out,
+        "[{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z {s}]",
+        .{
+            ymd.year,
+            mon_day.month.numeric(),
+            mon_day.day_index + 1,
+            tod.getHoursIntoDay(),
+            tod.getMinutesIntoHour(),
+            tod.getSecondsIntoMinute(),
+            duration,
+        },
+    ) catch "[??-??-??T??:??:??Z ??]";
+}
+
+/// Format elapsed seconds as zero-padded MM:SS (e.g. "05", "63" for > 1 min).
+fn fmtElapsedTime(seconds: i96, out: []u8) []const u8 {
+    const t = @max(seconds, 0);
+    const mm: u64 = @intCast(@divTrunc(t, 60));
+    const ss: u64 = @intCast(@rem(t, 60));
+    return std.fmt.bufPrint(out, "{d:0>2}:{d:0>2}", .{ mm, ss }) catch "00:00";
+}
+
+fn contentType(path: []const u8) []const u8 {
+    const ext = fs.path.extension(path);
+    if (mem.eql(u8, ext, ".html") or mem.eql(u8, ext, ".htm")) return "text/html; charset=utf-8";
+    if (mem.eql(u8, ext, ".css")) return "text/css; charset=utf-8";
+    if (mem.eql(u8, ext, ".js") or mem.eql(u8, ext, ".mjs")) return "application/javascript";
+    if (mem.eql(u8, ext, ".json") or mem.eql(u8, ext, ".map")) return "application/json";
+    if (mem.eql(u8, ext, ".png")) return "image/png";
+    if (mem.eql(u8, ext, ".jpg") or mem.eql(u8, ext, ".jpeg")) return "image/jpeg";
+    if (mem.eql(u8, ext, ".gif")) return "image/gif";
+    if (mem.eql(u8, ext, ".svg")) return "image/svg+xml";
+    if (mem.eql(u8, ext, ".ico")) return "image/x-icon";
+    if (mem.eql(u8, ext, ".wasm")) return "application/wasm";
+    if (mem.eql(u8, ext, ".txt")) return "text/plain; charset=utf-8";
+    return "application/octet-stream";
+}
+
+/// Maps a request target to a relative path inside the serve dir.
+/// Returns `null` for path traversal.
+fn sanitizePath(target: []const u8) ?[]const u8 {
+    var t = target;
+    while (mem.startsWith(u8, t, "/")) t = t[1..];
+    if (t.len == 0) return "index.html";
+    if (mem.indexOf(u8, t, "..") != null) return null;
+    return t;
+}
+
+fn logRequest(state: *State, method: std.http.Method, target: []const u8, status: u16, bytes: ?u64) void {
+    var ts_buf: [64]u8 = undefined;
+    const ts = fmtElapsed(state, &ts_buf);
+    const m = @tagName(method);
+    if (bytes) |b| {
+        state.log.appendFmt(state.io, "{s} {s} {s} -> {d} ({d}B)", .{ ts, m, target, status, b });
+    } else {
+        state.log.appendFmt(state.io, "{s} {s} {s} -> {d}", .{ ts, m, target, status });
+    }
+    state.dirty.store(true, .seq_cst);
+}
+
+fn handleConnection(state: *State, stream: net.Stream) void {
+    const io = state.io;
+    defer {
+        var copy = stream;
+        copy.close(io);
+    }
+
+    var send_buffer: [16384]u8 = undefined;
+    var recv_buffer: [16384]u8 = undefined;
+    var connection_reader = stream.reader(io, &recv_buffer);
+    var connection_writer = stream.writer(io, &send_buffer);
+    var server: std.http.Server = .init(&connection_reader.interface, &connection_writer.interface);
+
+    while (true) {
+        var request = server.receiveHead() catch |err| switch (err) {
+            error.HttpConnectionClosing => return,
+            else => return,
+        };
+        const method = request.head.method;
+        const target = request.head.target;
+
+        const sub = sanitizePath(target);
+        if (sub == null) {
+            request.respond("forbidden", .{
+                .status = .forbidden,
+                .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
+            }) catch {};
+            logRequest(state, method, target, 403, null);
+            continue;
+        }
+
+        const file_contents = state.serve_dir.readFileAlloc(io, sub.?, state.gpa, .limited(100 * 1024 * 1024)) catch |err| {
+            const not_found = switch (err) {
+                error.FileNotFound, error.AccessDenied => true,
+                else => false,
+            };
+            const body: []const u8 = if (not_found) "not found" else "server error";
+            const status: std.http.Status = if (not_found) .not_found else .internal_server_error;
+            request.respond(body, .{
+                .status = status,
+                .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
+            }) catch {};
+            logRequest(state, method, target, if (not_found) 404 else 500, null);
+            continue;
+        };
+        defer state.gpa.free(file_contents);
+
+        request.respond(file_contents, .{
+            .extra_headers = &.{.{ .name = "Content-Type", .value = contentType(sub.?) }},
+        }) catch {};
+
+        _ = state.requests.fetchAdd(1, .monotonic);
+        logRequest(state, method, target, 200, file_contents.len);
+    }
+}
+
+fn serveLoop(state: *State, tcp_server: *net.Server) Io.Cancelable!void {
+    const io = state.io;
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+    while (true) {
+        const stream = tcp_server.accept(io) catch |err| switch (err) {
+            error.Canceled => |e| return e,
+            else => return {},
+        };
+        group.concurrent(io, handleConnection, .{ state, stream }) catch {
+            var copy = stream;
+            copy.close(io);
+        };
+    }
+}
+
+fn tmuxSetTitle(state: *State) void {
+    if (!state.tmux) return;
+    var buf: [256]u8 = undefined;
+    const title = std.fmt.bufPrint(&buf, "\x1b]2;http://{s}:{d}\x07", .{ state.cfg.host, state.cfg.port }) catch return;
+    std.Io.File.stdout().writeStreamingAll(state.io, title) catch {};
+}
+
+fn winSize(state: *State) void {
+    const environ = state.environ;
+    if (environ.get("LINES")) |l| {
+        state.rows = std.fmt.parseInt(u16, l, 10) catch state.rows;
+    }
+    if (environ.get("COLUMNS")) |c| {
+        state.cols = std.fmt.parseInt(u16, c, 10) catch state.cols;
+    }
+}
+
+fn tuiLoop(state: *State) Io.Cancelable!void {
+    const io = state.io;
+    const header_lines: u16 = 5;
+
+    while (true) {
+        if (g_stop.load(.seq_cst)) break;
+        if (state.dirty.load(.seq_cst)) {
+            state.dirty.store(false, .seq_cst);
+            winSize(state);
+            render(state, state.rows, state.cols, header_lines);
+        }
+        io.sleep(.{ .nanoseconds = @as(i96, 50) * std.time.ns_per_ms }, .awake) catch break;
+    }
+}
+
+fn render(state: *State, rows: u16, cols: u16, header_lines: u16) void {
+    const io = state.io;
+    const stdout = std.Io.File.stdout();
+    var buf: [8192]u8 = undefined;
+
+    stdout.writeStreamingAll(io, "\x1b[1;1H\x1b[J") catch {};
+
+    var line: []const u8 = undefined;
+
+    line = std.fmt.bufPrint(&buf, " \x1b[1m\x1b[36mTEMPORARY HTTP SERVER\x1b[0m  {s}:{d}", .{ state.cfg.host, state.cfg.port }) catch return;
+    stdout.writeStreamingAll(io, line) catch {};
+    if (!state.tmux) {
+        stdout.writeStreamingAll(io, "  \x1b[90m(not in tmux)\x1b[0m") catch {};
+    }
+    stdout.writeStreamingAll(io, "\n") catch {};
+
+    line = std.fmt.bufPrint(&buf, " URL   \x1b[4mhttp://{s}:{d}/\x1b[0m\n", .{ state.cfg.host, state.cfg.port }) catch return;
+    stdout.writeStreamingAll(io, line) catch {};
+    line = std.fmt.bufPrint(&buf, " DIR   {s}\n", .{state.serve_path}) catch return;
+    stdout.writeStreamingAll(io, line) catch {};
+    const reqs = state.requests.load(.monotonic);
+    line = std.fmt.bufPrint(&buf, " REQS  {d}   Ctrl-C to quit\n", .{reqs}) catch return;
+    stdout.writeStreamingAll(io, line) catch {};
+
+    var i: usize = 0;
+    while (i < cols) : (i += 1) stdout.writeStreamingAll(io, "-") catch {};
+    stdout.writeStreamingAll(io, "\n") catch {};
+
+    state.log.mutex.lock(io) catch return;
+    defer state.log.mutex.unlock(io);
+
+    const total = state.log.len;
+    const avail: usize = if (rows > header_lines) rows - header_lines else 1;
+    const show_count = @min(total, avail);
+    const start: usize = total - show_count;
+    var idx: usize = 0;
+    while (idx < show_count) : (idx += 1) {
+        const ln = state.log.get(start + idx);
+        line = std.fmt.bufPrint(&buf, "{s}\n", .{ln}) catch continue;
+        stdout.writeStreamingAll(io, line) catch {};
+    }
+    while (idx < avail) : (idx += 1) {
+        stdout.writeStreamingAll(io, "\n") catch {};
+    }
+}
+
+fn installSigint() void {
+    const act: posix.Sigaction = .{
+        .handler = .{ .handler = onSigint },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(.INT, &act, null);
+}
+
+fn usage() void {
+    std.debug.print("tmphttp - serve a temp-dir over HTTP with a live TUI\n", .{});
+    std.debug.print("\nUsage: tmphttp [options] [content]\n", .{});
+    std.debug.print("\nOptions:\n", .{});
+    std.debug.print("  -p, --port <port>      Port to listen on               (default 8888)\n", .{});
+    std.debug.print("  -H, --host <host>      Interface/address to bind to    (default 127.0.0.1)\n", .{});
+    std.debug.print("  -c, --content <html>   Contents for index.html         (default: placeholder)\n", .{});
+    std.debug.print("  -f, --file <path>      Read index.html contents from a file\n", .{});
+    std.debug.print("  --no-tui               Run without the full-screen TUI\n", .{});
+    std.debug.print("  --help                 Show this help\n", .{});
+}
+
+var g_ctx_entered = false;
+fn ctxEnter(io: Io) void {
+    if (g_ctx_entered) return;
+    g_ctx_entered = true;
+    std.Io.File.stdout().writeStreamingAll(io, "\x1b[?1049h\x1b[?25l") catch {};
+}
+fn ctxExit(io: Io) void {
+    if (!g_ctx_entered) return;
+    g_ctx_entered = false;
+    std.Io.File.stdout().writeStreamingAll(io, "\x1b[?25h\x1b[?1049l") catch {};
+}
+
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+
+    var cfg: Config = .{
+        .host = "127.0.0.1",
+        .port = 8888,
+        .content = DEFAULT_CONTENT,
+    };
+    var no_tui = false;
+
+    var i: usize = 1;
+    var positional_content: ?[]const u8 = null;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (mem.eql(u8, arg, "--help") or mem.eql(u8, arg, "-h")) {
+            usage();
+            return;
+        } else if (mem.eql(u8, arg, "-p") or mem.eql(u8, arg, "--port")) {
+            i += 1;
+            if (i >= args.len) return error.MissingPort;
+            cfg.port = std.fmt.parseInt(u16, args[i], 10) catch return error.InvalidPort;
+        } else if (mem.eql(u8, arg, "-H") or mem.eql(u8, arg, "--host")) {
+            i += 1;
+            if (i >= args.len) return error.MissingHost;
+            cfg.host = args[i];
+        } else if (mem.eql(u8, arg, "-c") or mem.eql(u8, arg, "--content")) {
+            i += 1;
+            if (i >= args.len) return error.MissingContent;
+            cfg.content = args[i];
+        } else if (mem.eql(u8, arg, "-f") or mem.eql(u8, arg, "--file")) {
+            i += 1;
+            if (i >= args.len) return error.MissingFile;
+            const file_bytes = std.Io.Dir.cwd().readFileAlloc(io, args[i], arena, .unlimited) catch return error.CannotReadFile;
+            cfg.content = file_bytes;
+        } else if (mem.eql(u8, arg, "--no-tui")) {
+            no_tui = true;
+        } else if (mem.startsWith(u8, arg, "-")) {
+            return error.UnknownArg;
+        } else {
+            positional_content = arg;
+        }
+    }
+    if (positional_content) |c| cfg.content = c;
+
+    const tmux = init.environ_map.get("TMUX") != null;
+
+    // Create a unique temp working directory.
+    const tmp_base = init.environ_map.get("TMPDIR") orelse "/tmp";
+    var tmp_root = try std.Io.Dir.openDirAbsolute(io, tmp_base, .{});
+    defer tmp_root.close(io);
+
+    var dir_name_buf: [80]u8 = undefined;
+    var dir_name: []const u8 = undefined;
+    var random_bytes: [8]u8 = undefined;
+    while (true) {
+        io.random(&random_bytes);
+        const rand_u64 = std.mem.readInt(u64, &random_bytes, .little);
+        const name = std.fmt.bufPrint(&dir_name_buf, "tmphttp-{x}", .{rand_u64}) catch "tmphttp-tmp";
+        dir_name = name;
+        if (tmp_root.createDir(io, name, .default_dir)) {
+            break;
+        } else |err| switch (err) {
+            error.PathAlreadyExists => continue,
+            else => return err,
+        }
+    }
+
+    var serve_dir = try tmp_root.openDir(io, dir_name, .{});
+    defer serve_dir.close(io);
+
+    const serve_path = try tmp_root.realPathFileAlloc(io, dir_name, arena);
+
+    // Write index.html.
+    var index_file = try serve_dir.createFile(io, "index.html", .{ .truncate = true });
+    defer index_file.close(io);
+    try index_file.writeStreamingAll(io, cfg.content);
+
+    var state: State = .{
+        .io = io,
+        .gpa = gpa,
+        .cfg = cfg,
+        .serve_dir = serve_dir,
+        .serve_path = serve_path,
+        .log = try Log.init(gpa),
+        .tmux = tmux,
+        .environ = init.environ_map,
+        .start = std.Io.Timestamp.now(io, .awake),
+    };
+    defer state.log.deinit(gpa);
+
+    state.log.appendFmt(io, "Serving {s} at http://{s}:{d}/", .{ serve_path, cfg.host, cfg.port });
+    state.log.appendFmt(io, "Press Ctrl-C to stop. Temp dir kept after exit.", .{});
+
+    // Bind the TCP listener.
+    const address = try net.IpAddress.parse(cfg.host, cfg.port);
+    var tcp_server = try address.listen(io, .{ .reuse_address = true });
+    defer tcp_server.deinit(io);
+
+    // If running in tmux, set the window title to host:port.
+    tmuxSetTitle(&state);
+
+    installSigint();
+
+    if (no_tui) {
+        var serve_future = try io.concurrent(serveLoop, .{ &state, &tcp_server });
+        // Keep running until SIGINT.
+        while (!g_stop.load(.seq_cst)) {
+            io.sleep(.{ .nanoseconds = @as(i96, 200) * std.time.ns_per_ms }, .awake) catch {};
+        }
+        _ = serve_future.cancel(io) catch {};
+        _ = serve_future.await(io) catch {};
+        std.debug.print("Stopped. Temp dir kept at: {s}\n", .{serve_path});
+        return;
+    }
+
+    ctxEnter(io);
+
+    var serve_future = try io.concurrent(serveLoop, .{ &state, &tcp_server });
+    var tui_future = try io.concurrent(tuiLoop, .{ &state });
+
+    _ = tui_future.await(io) catch {};
+    _ = serve_future.cancel(io) catch {};
+    _ = serve_future.await(io) catch {};
+
+    ctxExit(io);
+    std.debug.print("Stopped. Temp dir kept at: {s}\n", .{serve_path});
+}
