@@ -359,6 +359,19 @@ fn tmuxSetTitle(state: *State) void {
 }
 
 fn winSize(state: *State) void {
+    var wsz: posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+    const io = state.io;
+    if (io.operate(.{ .device_io_control = .{
+        .file = std.Io.File.stdout(),
+        .code = posix.T.IOCGWINSZ,
+        .arg = &wsz,
+    } }) catch null) |res| {
+        if (res.device_io_control >= 0 and wsz.row > 0 and wsz.col > 0) {
+            state.rows = wsz.row;
+            state.cols = wsz.col;
+            return;
+        }
+    }
     const environ = state.environ;
     if (environ.get("LINES")) |l| {
         state.rows = std.fmt.parseInt(u16, l, 10) catch state.rows;
@@ -392,45 +405,49 @@ fn render(state: *State, rows: u16, cols: u16, header_lines: u16) void {
 
     var line: []const u8 = undefined;
 
-    line = std.fmt.bufPrint(&buf, " \x1b[1m\x1b[36mTEMPORARY HTTP SERVER\x1b[0m  {s}:{d}", .{ state.cfg.host, state.cfg.port }) catch return;
-    stdout.writeStreamingAll(io, line) catch {};
-    if (!state.tmux) {
-        stdout.writeStreamingAll(io, "  \x1b[90m(not in tmux)\x1b[0m") catch {};
-    }
-    stdout.writeStreamingAll(io, "\n") catch {};
+    const header_on = rows >= 7;
 
-    line = std.fmt.bufPrint(&buf, " URL   \x1b[4mhttp://{s}:{d}/\x1b[0m\n", .{ state.cfg.host, state.cfg.port }) catch return;
-    stdout.writeStreamingAll(io, line) catch {};
-    if (state.serve_path) |p| {
-        line = std.fmt.bufPrint(&buf, " DIR   {s}\n", .{p}) catch return;
+    if (header_on) {
+        line = std.fmt.bufPrint(&buf, " \x1b[1m\x1b[36mTEMPORARY HTTP SERVER\x1b[0m  {s}:{d}", .{ state.cfg.host, state.cfg.port }) catch return;
         stdout.writeStreamingAll(io, line) catch {};
-    } else {
-        line = std.fmt.bufPrint(&buf, " DIR   (in-memory)\n", .{}) catch return;
-        stdout.writeStreamingAll(io, line) catch {};
-    }
-    const reqs = state.requests.load(.monotonic);
-    line = std.fmt.bufPrint(&buf, " REQS  {d}   Ctrl-C to quit\n", .{reqs}) catch return;
-    stdout.writeStreamingAll(io, line) catch {};
+        if (!state.tmux) {
+            stdout.writeStreamingAll(io, "  \x1b[90m(not in tmux)\x1b[0m") catch {};
+        }
+        stdout.writeStreamingAll(io, "\n") catch {};
 
-    var i: usize = 0;
-    while (i < cols) : (i += 1) stdout.writeStreamingAll(io, "-") catch {};
-    stdout.writeStreamingAll(io, "\n") catch {};
+        line = std.fmt.bufPrint(&buf, " URL   \x1b[4mhttp://{s}:{d}/\x1b[0m\n", .{ state.cfg.host, state.cfg.port }) catch return;
+        stdout.writeStreamingAll(io, line) catch {};
+        if (state.serve_path) |p| {
+            line = std.fmt.bufPrint(&buf, " DIR   {s}\n", .{p}) catch return;
+            stdout.writeStreamingAll(io, line) catch {};
+        } else {
+            line = std.fmt.bufPrint(&buf, " DIR   (in-memory)\n", .{}) catch return;
+            stdout.writeStreamingAll(io, line) catch {};
+        }
+        const reqs = state.requests.load(.monotonic);
+        line = std.fmt.bufPrint(&buf, " REQS  {d}   Ctrl-C to quit\n", .{reqs}) catch return;
+        stdout.writeStreamingAll(io, line) catch {};
+
+        var i: usize = 0;
+        while (i < cols) : (i += 1) stdout.writeStreamingAll(io, "-") catch {};
+        stdout.writeStreamingAll(io, "\n") catch {};
+    }
 
     state.log.mutex.lock(io) catch return;
     defer state.log.mutex.unlock(io);
 
     const total = state.log.len;
-    const avail: usize = if (rows > header_lines) rows - header_lines else 1;
+    const avail: usize = if (header_on) rows - header_lines else rows;
     const show_count = @min(total, avail);
     const start: usize = total - show_count;
     var idx: usize = 0;
-    while (idx < show_count) : (idx += 1) {
-        const ln = state.log.get(start + idx);
-        line = std.fmt.bufPrint(&buf, "{s}\n", .{ln}) catch continue;
-        stdout.writeStreamingAll(io, line) catch {};
-    }
     while (idx < avail) : (idx += 1) {
-        stdout.writeStreamingAll(io, "\n") catch {};
+        if (idx < show_count) {
+            const ln = state.log.get(start + idx);
+            line = std.fmt.bufPrint(&buf, "{s}", .{ln}) catch continue;
+            stdout.writeStreamingAll(io, line) catch {};
+        }
+        if (idx + 1 < avail) stdout.writeStreamingAll(io, "\n") catch {};
     }
 }
 
