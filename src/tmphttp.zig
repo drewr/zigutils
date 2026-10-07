@@ -198,6 +198,53 @@ fn counterFragment(state: *const State, src_ip: []const u8, out: []u8) []const u
     return out[0..n];
 }
 
+/// Returns true when the client wants a plain-text (non-HTML) response.
+/// This happens when the request comes from curl (User-Agent starts with
+/// "curl/") or when it declares an explicit expectation of a non-HTML
+/// representation (an `Accept` header preferring `text/plain`, or an
+/// `X-Format: text` header).
+fn wantsPlainText(request: *std.http.Server.Request) bool {
+    var it = request.iterateHeaders();
+    while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "user-agent")) {
+            if (std.ascii.startsWithIgnoreCase(h.value, "curl/")) return true;
+        } else if (std.ascii.eqlIgnoreCase(h.name, "accept")) {
+            if (std.mem.indexOf(u8, h.value, "text/plain") != null and
+                std.mem.indexOf(u8, h.value, "text/html") == null)
+            {
+                return true;
+            }
+        } else if (std.ascii.eqlIgnoreCase(h.name, "x-format")) {
+            if (std.mem.indexOf(u8, h.value, "text") != null or
+                std.mem.indexOf(u8, h.value, "plain") != null)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Build the plain-text summary returned instead of the HTML page when the
+/// client asks for a non-HTML representation: request count, source IP, the
+/// current UTC server time, the served directory (when serving from disk), and
+/// the port.
+fn plainTextInfo(state: *const State, src_ip: []const u8, out: []u8) []const u8 {
+    const count = state.requests.load(.monotonic);
+    var t_buf: [32]u8 = undefined;
+    const t = formatUtc(state, &t_buf);
+    var n: usize = 0;
+    n += (std.fmt.bufPrint(out[n..],
+        "Requests: {d}\nYour IP: {s}\nServer time (UTC): {s}\n",
+        .{ count, src_ip, t },
+    ) catch return "error").len;
+    if (state.serve_path) |p| {
+        n += (std.fmt.bufPrint(out[n..], "Serving dir: {s}\n", .{p}) catch return "error").len;
+    }
+    n += (std.fmt.bufPrint(out[n..], "Port: {d}\n", .{state.cfg.port}) catch return "error").len;
+    return out[0..n];
+}
+
 /// Map a file extension to a Content-Type header value. Defaults to a binary
 /// fallback since extensionless paths (e.g. `/README`) may hold arbitrary data.
 fn contentType(path: []const u8) []const u8 {
@@ -282,17 +329,38 @@ fn handleConnection(state: *State, stream: net.Stream) void {
             continue;
         }
         if (mem.eql(u8, sub.?, "counter")) {
-            var frag_buf: [512]u8 = undefined;
-            const frag = counterFragment(state, src_ip, &frag_buf);
-            request.respond(frag, .{
-                .extra_headers = &.{.{ .name = "Content-Type", .value = "text/html; charset=utf-8" }},
-            }) catch {};
+            if (wantsPlainText(&request)) {
+                var txt_buf: [512]u8 = undefined;
+                const txt = plainTextInfo(state, src_ip, &txt_buf);
+                request.respond(txt, .{
+                    .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }},
+                }) catch {};
+            } else {
+                var frag_buf: [512]u8 = undefined;
+                const frag = counterFragment(state, src_ip, &frag_buf);
+                request.respond(frag, .{
+                    .extra_headers = &.{.{ .name = "Content-Type", .value = "text/html; charset=utf-8" }},
+                }) catch {};
+            }
             continue;
         }
 
         // Static content: either served from the configured directory on disk,
         // or (by default) the in-memory index.html body supplied at startup.
         if (state.serve_dir) |dir| {
+            // When curl asks for the directory's index and wants plain text,
+            // return the server summary instead of the (likely HTML) file.
+            const is_index = mem.eql(u8, sub.?, "index.html");
+            if (is_index and wantsPlainText(&request)) {
+                var txt_buf: [512]u8 = undefined;
+                const txt = plainTextInfo(state, src_ip, &txt_buf);
+                request.respond(txt, .{
+                    .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }},
+                }) catch {};
+                _ = state.requests.fetchAdd(1, .monotonic);
+                logRequest(state, method, target, 200, txt.len, src_ip);
+                continue;
+            }
             const file_contents = dir.readFileAlloc(io, sub.?, state.gpa, .limited(100 * 1024 * 1024)) catch |err| {
                 const not_found = switch (err) {
                     error.FileNotFound, error.AccessDenied => true,
@@ -322,6 +390,17 @@ fn handleConnection(state: *State, stream: net.Stream) void {
                     .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain" }},
                 }) catch {};
                 logRequest(state, method, target, 404, null, src_ip);
+                continue;
+            }
+
+            if (wantsPlainText(&request)) {
+                var txt_buf: [512]u8 = undefined;
+                const txt = plainTextInfo(state, src_ip, &txt_buf);
+                request.respond(txt, .{
+                    .extra_headers = &.{.{ .name = "Content-Type", .value = "text/plain; charset=utf-8" }},
+                }) catch {};
+                _ = state.requests.fetchAdd(1, .monotonic);
+                logRequest(state, method, target, 200, txt.len, src_ip);
                 continue;
             }
 
