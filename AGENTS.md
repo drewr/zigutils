@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- **Zig 0.16** (latest stable)
+- **Zig 0.18.0-dev.610+720939f8c** (pinned in `flake.nix`)
 - **Nix** (optional, for reproducible builds and development shell)
 
 ## Building

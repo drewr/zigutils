@@ -11,26 +11,26 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
 
-        # Latest zig dev build published on https://ziglang.org/download/
-        # (0.17.0-dev at the time of writing). Bundled as a virtual package
+        # Zig dev build from https://ziglang.org/download/, pinned with
+        # checksums for reproducible builds. Bundled as a virtual package
         # below so we don't depend on whatever nixpkgs happens to pin.
-        zigVersion = "0.17.0-dev.2234+80fe9b2b7";
+        zigVersion = "0.18.0-dev.610+720939f8c";
         zigBuilds = {
           aarch64-darwin = {
             arch = "aarch64-macos";
-            sha256 = "sha256-rzZfkzSXbfG1q9C4riJ1ar/t0hGOHNjFOsHUtD+c7MQ=";
+            sha256 = "sha256-aqLCw8L+jVQkMMBqmQuMsKKYjd2RhW4djvKywqDDe78=";
           };
           x86_64-darwin = {
             arch = "x86_64-macos";
-            sha256 = "sha256-Slxhi6+JkTg7+JtSp/z/DBfwk/7AfP5cXsJ8c2BsG9M=";
+            sha256 = "sha256-5WLJqIoMqWdzLj/INcV7lFizLNPK8BKaElEfx7T6zlc=";
           };
           x86_64-linux = {
             arch = "x86_64-linux";
-            sha256 = "sha256-LyOX7BRl5CYIIqsAs/ubx4uxqb/1ZCYMv0chWPWgShU=";
+            sha256 = "sha256-HuoVuR1pkLKtrjMEsJZbdbK6Fgdqt64pxjqzEDxVFaQ=";
           };
           aarch64-linux = {
             arch = "aarch64-linux";
-            sha256 = "sha256-QnF9vV4ruzjlsCFqkx0d1azLeS3hpA26PnhfHGJu7F8=";
+            sha256 = "sha256-qS442h8vep0cgSAJ4w7b/rmet3I1fbIVgTmCxVdxj5U=";
           };
         };
         zigCfg = zigBuilds.${system} or
