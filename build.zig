@@ -64,6 +64,15 @@ pub fn build(b: *std.Build) !void {
     const run_test = b.addRunArtifact(gitclone_test_exe);
     test_step.dependOn(&run_test.step);
 
+    const nix_zsh_env_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/nix-zsh-env.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(nix_zsh_env_test).step);
+
     const tmphttp_test = b.addExecutable(.{
         .name = "tmphttp_test",
         .root_module = b.createModule(.{
