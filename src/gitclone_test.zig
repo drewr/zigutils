@@ -487,7 +487,7 @@ test "stress test parsePercentage with boundary numbers" {
 }
 
 // ============================================================================
-// EXTRACT PACKAGE TESTS (from nix-zsh-env logic, tested here for completeness)
+// EXTRACT PACKAGE TESTS (from zsh-nix-env logic, tested here for completeness)
 // ============================================================================
 
 test "extractPackage parses /nix/store paths" {

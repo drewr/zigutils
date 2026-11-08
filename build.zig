@@ -14,15 +14,15 @@ pub fn build(b: *std.Build) !void {
     });
     b.installArtifact(gitclone);
 
-    const nix_zsh_env = b.addExecutable(.{
-        .name = "nix-zsh-env",
+    const zsh_nix_env = b.addExecutable(.{
+        .name = "zsh-nix-env",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/nix-zsh-env.zig"),
+            .root_source_file = b.path("src/zsh-nix-env.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
-    b.installArtifact(nix_zsh_env);
+    b.installArtifact(zsh_nix_env);
 
     const tmphttp = b.addExecutable(.{
         .name = "tmphttp",
@@ -39,9 +39,9 @@ pub fn build(b: *std.Build) !void {
     const run_gitclone_exe = b.addRunArtifact(gitclone);
     run_gitclone.dependOn(&run_gitclone_exe.step);
 
-    const run_nix_zsh_env = b.step("run-nix-zsh-env", "Run nix-zsh-env");
-    const run_nix_zsh_env_exe = b.addRunArtifact(nix_zsh_env);
-    run_nix_zsh_env.dependOn(&run_nix_zsh_env_exe.step);
+    const run_zsh_nix_env = b.step("run-zsh-nix-env", "Run zsh-nix-env");
+    const run_zsh_nix_env_exe = b.addRunArtifact(zsh_nix_env);
+    run_zsh_nix_env.dependOn(&run_zsh_nix_env_exe.step);
 
     const run_tmphttp = b.step("run-tmphttp", "Run tmphttp");
     const run_tmphttp_exe = b.addRunArtifact(tmphttp);
@@ -64,14 +64,14 @@ pub fn build(b: *std.Build) !void {
     const run_test = b.addRunArtifact(gitclone_test_exe);
     test_step.dependOn(&run_test.step);
 
-    const nix_zsh_env_test = b.addTest(.{
+    const zsh_nix_env_test = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/nix-zsh-env.zig"),
+            .root_source_file = b.path("src/zsh-nix-env.zig"),
             .target = target,
             .optimize = .Debug,
         }),
     });
-    test_step.dependOn(&b.addRunArtifact(nix_zsh_env_test).step);
+    test_step.dependOn(&b.addRunArtifact(zsh_nix_env_test).step);
 
     const tmphttp_test = b.addExecutable(.{
         .name = "tmphttp_test",

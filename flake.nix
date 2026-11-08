@@ -1,5 +1,5 @@
 {
-  description = "Zig utilities including nix-zsh-env";
+  description = "Zig utilities including zsh-nix-env";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -108,8 +108,8 @@
             };
           };
 
-          nix-zsh-env = pkgs.stdenv.mkDerivation {
-            pname = "nix-zsh-env";
+          zsh-nix-env = pkgs.stdenv.mkDerivation {
+            pname = "zsh-nix-env";
             version = "0.1.0";
             src = filteredSrc;
 
@@ -122,11 +122,11 @@
 
             installPhase = ''
               mkdir -p $out/bin
-              cp zig-out/bin/nix-zsh-env $out/bin/
+              cp zig-out/bin/zsh-nix-env $out/bin/
             '';
 
             meta = {
-              description = "Display nix-shell packages for zsh prompt";
+              description = "Show active Nix shells (nix-shell, nix develop) in the zsh prompt";
               license = pkgs.lib.licenses.mit;
               platforms = pkgs.lib.platforms.all;
             };
@@ -160,7 +160,7 @@
             name = "zigutils";
             paths = [
               self.packages.${system}.gitclone
-              self.packages.${system}.nix-zsh-env
+              self.packages.${system}.zsh-nix-env
               self.packages.${system}.tmphttp
             ];
           };
@@ -176,9 +176,9 @@
             type = "app";
             program = "${self.packages.${system}.gitclone}/bin/gitclone";
           };
-          nix-zsh-env = {
+          zsh-nix-env = {
             type = "app";
-            program = "${self.packages.${system}.nix-zsh-env}/bin/nix-zsh-env";
+            program = "${self.packages.${system}.zsh-nix-env}/bin/zsh-nix-env";
           };
           tmphttp = {
             type = "app";
