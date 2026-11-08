@@ -25,7 +25,7 @@ zig build
 ```bash
 zig build run                # runs gitclone
 zig build run-gitclone       # runs gitclone
-zig build run-nix-zsh-env    # runs nix-zsh-env
+zig build run-zsh-nix-env    # runs zsh-nix-env
 ```
 
 ## Testing
@@ -47,10 +47,10 @@ The project provides Nix flake outputs:
 | Output | Description |
 |--------|-------------|
 | `packages.<system>.gitclone` | Standalone `gitclone` binary |
-| `packages.<system>.nix-zsh-env` | Standalone `nix-zsh-env` binary |
+| `packages.<system>.zsh-nix-env` | Standalone `zsh-nix-env` binary |
 | `packages.<system>.default` | Both binaries via `symlinkJoin` |
 | `apps.<system>.gitclone` | Runnable `gitclone` app |
-| `apps.<system>.nix-zsh-env` | Runnable `nix-zsh-env` app |
+| `apps.<system>.zsh-nix-env` | Runnable `zsh-nix-env` app |
 | `devShells.default` | Development shell with Zig |
 
 Examples:
@@ -59,7 +59,7 @@ Examples:
 nix build                   # builds default (both binaries)
 nix build .#gitclone        # builds gitclone only
 nix run .                   # runs gitclone
-nix run .#nix-zsh-env       # runs nix-zsh-env
+nix run .#zsh-nix-env       # runs zsh-nix-env
 ```
 
 ## Build Options
