@@ -22,7 +22,7 @@ nix_info=$(nix-zsh-env)
 | none                      | (empty)        |
 | `nix-shell -p jq ripgrep` | `λjq:ripgrep`  |
 | `nix develop`             | `❄`            |
-| both                      | `❄λjq:ripgrep` |
+| `nix-shell` inside `nix develop` | `❄λjq:ripgrep` |
 
 Each environment is a `ShellScenario` variant with a `ShellDetector` that
 inspects the environment. `ActiveShells` runs every detector, so more than one
