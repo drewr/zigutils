@@ -67,9 +67,23 @@ fn detectNixDevelop(env: *const Env) ?ShellScenario {
     return .nix_develop;
 }
 
+/// Pure: the derivation name in a nix develop NIX_GCROOT, e.g.
+/// "/nix/store/<hash>-zigutils-env" -> "zigutils-env".
+fn gcrootName(gcroot: []const u8) ?[]const u8 {
+    const base = std.fs.path.basename(gcroot);
+    const dash = mem.indexOfScalar(u8, base, '-') orelse return null;
+    return base[dash + 1 ..];
+}
+
 fn detectNixShell(env: *const Env) ?ShellScenario {
-    // nix develop also sets buildInputs; NIX_GCROOT tells them apart.
-    if (env.get("NIX_GCROOT") != null) return null;
+    // nix develop also sets buildInputs. A nix-shell nested inside nix develop
+    // inherits NIX_GCROOT but overwrites $name, so buildInputs belongs to
+    // nix develop only when $name still matches the NIX_GCROOT derivation.
+    if (env.get("NIX_GCROOT")) |gcroot| {
+        const name = env.get("name") orelse return null;
+        const dev_name = gcrootName(gcroot) orelse return null;
+        if (mem.eql(u8, name, dev_name)) return null;
+    }
     const build_inputs = env.get("buildInputs") orelse return null;
     if (mem.trim(u8, build_inputs, " ").len == 0) return null;
     return .{ .nix_shell = .{ .build_inputs = build_inputs } };
@@ -198,8 +212,26 @@ test "nix develop with buildInputs is not also a nix-shell" {
     defer env.deinit();
     try env.put("IN_NIX_SHELL", "impure");
     try env.put("NIX_GCROOT", "/nix/store/91p88x63-zigutils-env");
+    try env.put("name", "zigutils-env");
     try env.put("buildInputs", "/nix/store/za20v1vw-jq-1.8.2-dev");
     try expectRender(&env, "❄");
+}
+
+test "nix-shell nested inside nix develop shows both" {
+    // Env observed from `nix develop -c nix-shell -p jq`.
+    var env = Env.init(testing.allocator);
+    defer env.deinit();
+    try env.put("IN_NIX_SHELL", "impure");
+    try env.put("NIX_GCROOT", "/nix/store/91p88x63-zigutils-env");
+    try env.put("name", "shell");
+    try env.put("buildInputs", "/nix/store/za20v1vw-jq-1.8.2-dev");
+    try env.put("nativeBuildInputs", "");
+    try expectRender(&env, "❄λjq");
+}
+
+test "gcrootName" {
+    try testing.expectEqualStrings("zigutils-env", gcrootName("/nix/store/91p88x63-zigutils-env").?);
+    try testing.expect(gcrootName("/nix/store/nodash") == null);
 }
 
 test "multiple active shells render back to back" {
