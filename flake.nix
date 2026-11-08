@@ -156,12 +156,37 @@
             };
           };
 
+          zsh-hist = pkgs.stdenv.mkDerivation {
+            pname = "zsh-hist";
+            version = "0.1.0";
+            src = filteredSrc;
+
+            nativeBuildInputs = [ zig-dev ];
+
+            buildPhase = ''
+              export HOME=$TMPDIR
+              zig build -Doptimize=ReleaseSafe
+            '';
+
+            installPhase = ''
+              mkdir -p $out/bin
+              cp zig-out/bin/zsh-hist $out/bin/
+            '';
+
+            meta = {
+              description = "Delete entries matching a pattern from zsh history";
+              license = pkgs.lib.licenses.mit;
+              platforms = pkgs.lib.platforms.all;
+            };
+          };
+
           default = pkgs.symlinkJoin {
             name = "zigutils";
             paths = [
               self.packages.${system}.gitclone
               self.packages.${system}.zsh-nix-env
               self.packages.${system}.tmphttp
+              self.packages.${system}.zsh-hist
             ];
           };
         };
@@ -183,6 +208,10 @@
           tmphttp = {
             type = "app";
             program = "${self.packages.${system}.tmphttp}/bin/tmphttp";
+          };
+          zsh-hist = {
+            type = "app";
+            program = "${self.packages.${system}.zsh-hist}/bin/zsh-hist";
           };
           default = self.apps.${system}.gitclone;
         };

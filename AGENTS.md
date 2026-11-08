@@ -26,6 +26,8 @@ zig build
 zig build run                # runs gitclone
 zig build run-gitclone       # runs gitclone
 zig build run-zsh-nix-env    # runs zsh-nix-env
+zig build run-tmphttp        # runs tmphttp
+zig build run-zsh-hist       # runs zsh-hist
 ```
 
 ## Testing
@@ -33,6 +35,9 @@ zig build run-zsh-nix-env    # runs zsh-nix-env
 ```bash
 zig build test
 ```
+
+The regex test file also contains a `std.testing.fuzz` entry point; during a
+normal test run it exercises its seed corpus.
 
 ## Installing
 
@@ -48,9 +53,13 @@ The project provides Nix flake outputs:
 |--------|-------------|
 | `packages.<system>.gitclone` | Standalone `gitclone` binary |
 | `packages.<system>.zsh-nix-env` | Standalone `zsh-nix-env` binary |
-| `packages.<system>.default` | Both binaries via `symlinkJoin` |
+| `packages.<system>.tmphttp` | Standalone `tmphttp` binary |
+| `packages.<system>.zsh-hist` | Standalone `zsh-hist` binary |
+| `packages.<system>.default` | All binaries via `symlinkJoin` |
 | `apps.<system>.gitclone` | Runnable `gitclone` app |
 | `apps.<system>.zsh-nix-env` | Runnable `zsh-nix-env` app |
+| `apps.<system>.tmphttp` | Runnable `tmphttp` app |
+| `apps.<system>.zsh-hist` | Runnable `zsh-hist` app |
 | `devShells.default` | Development shell with Zig |
 
 Examples:
