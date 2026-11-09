@@ -406,6 +406,69 @@ test "run: delete removes matches, writes a backup and keeps mode 0600" {
     try testing.expect(mem.indexOf(u8, out.written(), "Deleted 2 of 4 entries") != null);
 }
 
+test "writeBackup creates the file with the history's bytes and mode" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const original = "git status\nls\n";
+    try writeFile(tmp.dir, "history", original, @fromBackingInt(@intCast(0o640)));
+
+    try zsh.writeBackup(io, tmp.dir, "history", "history.bak", original);
+
+    const backup = try readFileAlloc(tmp.dir, "history.bak");
+    defer testing.allocator.free(backup);
+    try testing.expectEqualStrings(original, backup);
+
+    const stat = try tmp.dir.statFile(io, "history.bak", .{});
+    try testing.expectEqual(@as(std.posix.mode_t, 0o640), @backingInt(stat.permissions) & 0o7777);
+}
+
+test "writeBackup refuses to overwrite an existing backup" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try setupHistory(&tmp, "git status\n");
+    try writeFile(tmp.dir, "history.bak", "older backup\n", @fromBackingInt(@intCast(0o600)));
+
+    try testing.expectError(
+        error.PathAlreadyExists,
+        zsh.writeBackup(io, tmp.dir, "history", "history.bak", "git status\n"),
+    );
+
+    const kept = try readFileAlloc(tmp.dir, "history.bak");
+    defer testing.allocator.free(kept);
+    try testing.expectEqualStrings("older backup\n", kept);
+}
+
+test "run: delete leaves the history alone when the backup can't be written" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const original = "git status\nls\n";
+    try setupHistory(&tmp, original);
+
+    // Occupy the backup name so writing the backup fails.
+    const backup_name = try expectedBackup(testing.allocator);
+    defer testing.allocator.free(backup_name);
+    try writeFile(tmp.dir, backup_name, "older backup\n", @fromBackingInt(@intCast(0o600)));
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+
+    try testing.expectError(error.PathAlreadyExists, zsh.run(io, testing.allocator, tmp.dir, "history", .{
+        .delete = true,
+        .pattern = "git",
+    }, &out.writer, 1_700_000_000));
+
+    const after = try readFileAlloc(tmp.dir, "history");
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings(original, after);
+    try testing.expect(!try exists(tmp.dir, "history.LOCK"));
+}
+
 test "run: an existing lock returns HistoryLocked and leaves the file alone" {
     const io = testing.io;
     var tmp = testing.tmpDir(.{});

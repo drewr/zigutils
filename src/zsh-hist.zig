@@ -222,6 +222,40 @@ pub fn extractHistfileMarker(output: []const u8) ?[]const u8 {
 }
 
 /// Format an epoch timestamp as `YYYYMMDD-HHMMSS` in UTC.
+pub const BackupError = error{BackupIncomplete};
+
+/// Write `contents` (the history bytes already read) to `backup_path`, with
+/// the permissions of `path`. Fails if `backup_path` already exists, and
+/// checks that the whole file landed before the caller rewrites the history.
+///
+/// This deliberately avoids `Dir.copyFile(.., .{ .replace = false })`: in Zig
+/// 0.18.0-dev.610 its final `linkat(AT_EMPTY_PATH)` fails with ENOENT for
+/// unprivileged processes on Linux, and that error is swallowed, so it reports
+/// success without creating the file.
+pub fn writeBackup(
+    io: Io,
+    dir: Io.Dir,
+    path: []const u8,
+    backup_path: []const u8,
+    contents: []const u8,
+) !void {
+    const source = try dir.statFile(io, path, .{});
+    var file = try dir.createFile(io, backup_path, .{
+        .exclusive = true,
+        .permissions = source.permissions,
+    });
+    var file_open = true;
+    defer if (file_open) file.close(io);
+    errdefer dir.deleteFile(io, backup_path) catch {};
+
+    try file.writeStreamingAll(io, contents);
+    file.close(io);
+    file_open = false;
+
+    const written = try dir.statFile(io, backup_path, .{ .follow_symlinks = false });
+    if (written.size != contents.len) return BackupError.BackupIncomplete;
+}
+
 pub fn fmtBackupSuffix(epoch_secs: u64, buf: []u8) []const u8 {
     const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_secs };
     const ymd = epoch.getEpochDay().calculateYearDay();
@@ -338,7 +372,7 @@ pub fn run(
         const suffix = fmtBackupSuffix(now_secs, &suffix_buf);
         const bp = try std.fmt.allocPrint(gpa, "{s}.bak.{s}", .{ path, suffix });
         errdefer gpa.free(bp);
-        try dir.copyFile(path, dir, bp, io, .{ .replace = false });
+        try writeBackup(io, dir, path, bp, raw);
         backup_path = bp;
         try out.print("Backup written to {s}\n", .{bp});
     }
