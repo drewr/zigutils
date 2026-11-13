@@ -26,6 +26,15 @@ fn stripVersion(name: []const u8) []const u8 {
     return name;
 }
 
+/// Pure: the package name of a PATH entry of the form
+/// "/nix/store/<hash>-<package>/bin". Returns null for anything else,
+/// including other PATH entries.
+fn storeBinPackage(entry: []const u8) ?[]const u8 {
+    const suffix = "/bin";
+    if (!mem.endsWith(u8, entry, suffix)) return null;
+    return extractPackage(entry[0 .. entry.len - suffix.len]);
+}
+
 /// One variant per shell environment we recognize. The payload holds
 /// only what render needs.
 const ShellScenario = union(enum) {
@@ -33,8 +42,18 @@ const ShellScenario = union(enum) {
     nix_develop,
     /// `nix-shell`. Payload is the raw $buildInputs.
     nix_shell: struct { build_inputs: []const u8 },
+    /// `nix shell` (new CLI). Payload is the raw $PATH, since the command
+    /// exports no package list.
+    nix_shell_cmd: struct { path: []const u8 },
 
     const max_packages = 5;
+
+    /// Pure: append one package name to the label.
+    fn writePackage(w: *std.Io.Writer, pkg: []const u8, count: *usize) std.Io.Writer.Error!void {
+        if (count.* > 0) try w.writeByte(':');
+        try w.writeAll(pkg);
+        count.* += 1;
+    }
 
     /// Pure: write this scenario's label (no newline).
     fn render(self: ShellScenario, w: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -47,9 +66,20 @@ const ShellScenario = union(enum) {
                 while (iter.next()) |path| {
                     if (path.len == 0) continue;
                     const pkg = extractPackage(path) orelse continue;
-                    if (count > 0) try w.writeByte(':');
-                    try w.writeAll(pkg);
-                    count += 1;
+                    try writePackage(w, pkg, &count);
+                    if (count >= max_packages) break;
+                }
+            },
+            .nix_shell_cmd => |s| {
+                try w.writeAll("λ");
+                // `nix shell` prepends its packages to $PATH. Everything
+                // after the first non-store entry belongs to the base
+                // environment, so stop there.
+                var iter = mem.splitScalar(u8, s.path, ':');
+                var count: usize = 0;
+                while (iter.next()) |entry| {
+                    const pkg = storeBinPackage(entry) orelse break;
+                    try writePackage(w, pkg, &count);
                     if (count >= max_packages) break;
                 }
             },
@@ -89,10 +119,21 @@ fn detectNixShell(env: *const Env) ?ShellScenario {
     return .{ .nix_shell = .{ .build_inputs = build_inputs } };
 }
 
+fn detectNixShellCmd(env: *const Env) ?ShellScenario {
+    if (env.get("IN_NIX_SHELL") == null) return null;
+    // `nix develop` and legacy `nix-shell` both set $name; `nix shell` does not.
+    if (env.get("name") != null) return null;
+    if (env.get("NIX_GCROOT") != null) return null;
+    if (env.get("buildInputs")) |build_inputs| {
+        if (mem.trim(u8, build_inputs, " ").len != 0) return null;
+    }
+    return .{ .nix_shell_cmd = .{ .path = env.get("PATH") orelse "" } };
+}
+
 /// Order here is the order labels appear in the prompt.
 /// To add an environment: add a ShellScenario variant, its render arm,
 /// and a ShellDetector here.
-const shell_detectors = [_]ShellDetector{ detectNixDevelop, detectNixShell };
+const shell_detectors = [_]ShellDetector{ detectNixDevelop, detectNixShell, detectNixShellCmd };
 
 /// Every ShellScenario that is true right now. More than one can be
 /// true at once.
@@ -191,6 +232,62 @@ test "nix-shell with no parseable packages still shows glyph" {
     defer env.deinit();
     try env.put("buildInputs", "/opt/thing");
     try expectRender(&env, "λ");
+}
+
+test "nix shell reads packages from PATH" {
+    var env = Env.init(testing.allocator);
+    defer env.deinit();
+    try env.put("IN_NIX_SHELL", "impure");
+    try env.put("NIX_SHELL_LEVEL", "1");
+    try env.put("PATH", "/nix/store/c2ii5nkzv440xj9igxsd49i8f5y2vr6f-cargo-1.99.1/bin:/usr/bin:/bin");
+    const active = ActiveShells.detect(&env);
+    try testing.expectEqual(@as(usize, 1), active.len);
+    try testing.expect(active.slice()[0] == .nix_shell_cmd);
+    try expectRender(&env, "λcargo");
+}
+
+test "nix shell caps package count and stops at the base PATH" {
+    var env = Env.init(testing.allocator);
+    defer env.deinit();
+    try env.put("IN_NIX_SHELL", "impure");
+    try env.put(
+        "PATH",
+        "/nix/store/a-p1/bin:/nix/store/a-p2/bin:/nix/store/a-p3/bin:" ++
+            "/nix/store/a-p4/bin:/nix/store/a-p5/bin:/nix/store/a-p6/bin:/usr/bin",
+    );
+    try expectRender(&env, "λp1:p2:p3:p4:p5");
+}
+
+test "nix shell with no store entries still shows glyph" {
+    var env = Env.init(testing.allocator);
+    defer env.deinit();
+    try env.put("IN_NIX_SHELL", "impure");
+    try env.put("PATH", "/usr/bin:/nix/store/a-jq/bin");
+    try expectRender(&env, "λ");
+}
+
+test "nix shell without PATH still shows glyph" {
+    // `nix shell` without PATH still reports the shell.
+    var env = Env.init(testing.allocator);
+    defer env.deinit();
+    try env.put("IN_NIX_SHELL", "impure");
+    try expectRender(&env, "λ");
+}
+
+test "legacy nix-shell without buildInputs is not a nix shell" {
+    var env = Env.init(testing.allocator);
+    defer env.deinit();
+    try env.put("IN_NIX_SHELL", "impure");
+    try env.put("NIX_SHELL_LEVEL", "1");
+    try env.put("name", "probe");
+    try env.put("PATH", "/nix/store/a-jq/bin");
+    try expectRender(&env, "");
+}
+
+test "storeBinPackage" {
+    try testing.expectEqualStrings("cargo", storeBinPackage("/nix/store/c2ii5n-cargo-1.99.1/bin").?);
+    try testing.expect(storeBinPackage("/usr/bin") == null);
+    try testing.expect(storeBinPackage("/nix/store/c2ii5n-cargo-1.99.1") == null);
 }
 
 test "nix develop" {

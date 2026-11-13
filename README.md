@@ -21,8 +21,14 @@ nix_info=$(zsh-nix-env)
 |---------------------------|----------------|
 | none                      | (empty)        |
 | `nix-shell -p jq ripgrep` | `λjq:ripgrep`  |
+| `nix shell nixpkgs#cargo` | `λcargo`       |
 | `nix develop`             | `❄`            |
 | `nix-shell` inside `nix develop` | `❄λjq:ripgrep` |
+
+`nix shell` exports no package list, so its names are inferred from the
+leading `/nix/store/<hash>-<package>/bin` entries in `$PATH`. A `nix shell`
+nested inside `nix develop` or `nix-shell` cannot be told apart from the
+outer shell and is not reported separately.
 
 Each environment is a `ShellScenario` variant with a `ShellDetector` that
 inspects the environment. `ActiveShells` runs every detector, so more than one
